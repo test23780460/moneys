@@ -4,7 +4,7 @@ A private, local-first personal finance app for tracking paychecks, spending, we
 
 ## Use
 
-Open the [live site](https://test23780460.github.io/moneys/), then add a paycheck or expense with **Quick add**. The Transactions page provides an editable ledger with search, filters, sorting, CSV import and export, and spreadsheet paste. Plan categories by week, schedule recurring bills, and create savings goals from the sidebar.
+Open the [live site](https://test23780460.github.io/moneys/), then add a paycheck or expense with **Quick add**. The Transactions page provides an editable ledger with search, filters, sorting, CSV import and export, and spreadsheet paste. The Weekly Budget page shows received income history, optional expected-pay plans, category allocations, and a way to copy last week's plan. Schedule recurring bills and create savings goals from the sidebar.
 
 All data is stored in **IndexedDB in your current browser profile**, with a localStorage write-through snapshot so immediate refreshes retain recent edits. It survives normal refreshes and browser restarts, but does not sync between devices. Use **Settings → Download JSON backup** regularly, especially before clearing browser data or changing devices. Restore from the same page. Browser local data is not encrypted by this app.
 
