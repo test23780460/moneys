@@ -1,5 +1,6 @@
 import { freshState } from "./storage.js";
 import { defaultPayday } from "./payday.js";
+import { defaultGambling } from "./gambling.js";
 
 // PostgreSQL jsonb can reorder object keys; compare values rather than JSON text.
 export function same(a, b) {
@@ -99,6 +100,8 @@ export function hasFinancialData(state) {
       Object.keys(state.allocations || {}).length ||
       Object.keys(state.payPlans || {}).length ||
       Object.keys(state.payday?.checkins || {}).length ||
+      (state.gambling?.entries?.length || 0) ||
+      (state.gambling && !same(state.gambling.limit, defaults.gambling.limit)) ||
       (state.payday && !same(state.payday, defaults.payday)) ||
       !same(state.categories, defaults.categories) ||
       !same(state.settings, defaults.settings),
@@ -151,6 +154,10 @@ export function mergeStates(base, local, remote, preference = null) {
         ),
         checkins: mergeMap(base.payday?.checkins || {}, local.payday?.checkins || {}, remote.payday?.checkins || {}, "payday check-in", conflicts, preference),
       },
+      gambling: {
+        entries: mergeRows(base.gambling?.entries || [], local.gambling?.entries || [], remote.gambling?.entries || [], "gambling entry", conflicts, preference),
+        limit: mergeMap(base.gambling?.limit || defaultGambling().limit, local.gambling?.limit || defaultGambling().limit, remote.gambling?.limit || defaultGambling().limit, "gambling limit", conflicts, preference),
+      },
       categories: choose(base.categories, local.categories, remote.categories, "categories", conflicts, preference),
       settings,
       createdAt: choose(base.createdAt, local.createdAt, remote.createdAt, "creation date", conflicts, preference),
@@ -188,12 +195,28 @@ export function mergeImport(local, cloud) {
     }
   }
   merged.payday ||= structuredClone(local.payday || defaultPayday());
+  merged.gambling ||= defaultGambling();
+  const gamblingIds = new Set(merged.gambling.entries.map((entry) => entry.id));
+  for (const entry of local.gambling?.entries || []) {
+    if (gamblingIds.has(entry.id)) { counts.skipped++; continue; }
+    // An ID collision may belong to a different ledger row in the cloud.
+    const links = [[entry.stakeTransactionId, "Expense", "Paid", entry.stakeCents],
+      [entry.payoutTransactionId, "Income", "Received", entry.payoutCents]];
+    if (links.every(([id, type, status, amount]) => amount === 0 ? id == null :
+      merged.transactions.some((tx) => tx.id === id && tx.type === type && tx.status === status && tx.amountCents === amount)) &&
+      links.every(([id]) => !id || !merged.gambling.entries.some((e) =>
+        e.stakeTransactionId === id || e.payoutTransactionId === id))) {
+      merged.gambling.entries.push(structuredClone(entry));
+      gamblingIds.add(entry.id);
+    } else counts.skipped++;
+  }
   merged.payday.checkins ||= {};
   for (const [date, entry] of Object.entries(local.payday?.checkins || {}))
     if (!Object.hasOwn(merged.payday.checkins, date)) merged.payday.checkins[date] = structuredClone(entry);
   if (!hasFinancialData(cloud)) {
     merged.settings = structuredClone(local.settings);
     if (local.payday) merged.payday = structuredClone(local.payday);
+    if (local.gambling) merged.gambling.limit = structuredClone(local.gambling.limit);
   }
   return { state: merged, counts };
 }

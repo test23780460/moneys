@@ -1,11 +1,15 @@
 import { DEFAULT_CATEGORIES, today } from "./finance.js";
 import { defaultPayday, validTimeZone } from "./payday.js";
+import { defaultGambling } from "./gambling.js";
 const DB = "northstar-budget-v1";
 const KEY = "budget";
 const SNAPSHOT = "northstar-budget-write-through-v1";
 const syncKey = (userId) => `northstar-sync-base-v1:${userId}`;
 const stateKey = (userId) => (userId ? `${KEY}:${userId}` : KEY);
 const snapshotKey = (userId) => (userId ? `${SNAPSHOT}:${userId}` : SNAPSHOT);
+const validDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+  !Number.isNaN(Date.parse(`${value}T12:00:00Z`)) &&
+  new Date(`${value}T12:00:00Z`).toISOString().slice(0, 10) === value;
 export const freshState = () => ({
   version: 1,
   transactions: [],
@@ -14,6 +18,7 @@ export const freshState = () => ({
   allocations: {},
   payPlans: {},
   payday: defaultPayday(),
+  gambling: defaultGambling(),
   categories: [...DEFAULT_CATEGORIES],
   settings: { currency: "USD", weekStarts: 1, startingBalanceCents: 0 },
   createdAt: today(),
@@ -155,6 +160,48 @@ export function validateBackup(raw) {
         !["completed", "skipped", "dismissed", "snoozed"].includes(entry?.status) ||
         (entry.deferUntil && Number.isNaN(Date.parse(entry.deferUntil))))
         throw Error("Backup contains invalid payday check-in history.");
+    }
+  }
+  if (raw.gambling) {
+    const g = raw.gambling;
+    if (!Array.isArray(g.entries) || !g.limit ||
+      !["none", "week", "month"].includes(g.limit.period) ||
+      !Number.isSafeInteger(g.limit.amountCents) || g.limit.amountCents < 0 ||
+      (g.limit.period !== "none" && g.limit.amountCents === 0) ||
+      g.entries.length > 10000)
+      throw Error("Backup contains invalid gambling settings.");
+    const ids = new Set(), links = new Set();
+    for (const e of g.entries) {
+      if (!e || typeof e.id !== "string" || !e.id || ids.has(e.id) ||
+        !["scratch", "game", "other"].includes(e.kind) ||
+        !validDate(e.date) ||
+        (e.payoutDate && !validDate(e.payoutDate)) ||
+        typeof e.name !== "string" || !e.name.trim() || e.name.length > 500 ||
+        typeof e.notes !== "string" || e.notes.length > 5000 ||
+        typeof e.platform !== "string" || e.platform.length > 500 ||
+        !Number.isSafeInteger(e.stakeCents) || e.stakeCents < 0 ||
+        !Number.isSafeInteger(e.payoutCents) || e.payoutCents < 0 ||
+        (!e.stakeCents && !e.payoutCents) ||
+        (e.kind === "scratch" && (!Number.isSafeInteger(e.ticketPriceCents) || e.ticketPriceCents < 0 ||
+          !Number.isInteger(e.ticketCount) || e.ticketCount < 1 || e.ticketCount > 10000 ||
+          e.ticketPriceCents * e.ticketCount !== e.stakeCents)) ||
+        (e.time && !/^([01]\d|2[0-3]):[0-5]\d$/.test(e.time)) ||
+        (e.rounds != null && (!Number.isInteger(e.rounds) || e.rounds < 1 || e.rounds > 1000000)))
+        throw Error("Backup contains an invalid gambling entry.");
+      ids.add(e.id);
+      for (const [side, type, amount] of [["stake", "Expense", e.stakeCents], ["payout", "Income", e.payoutCents]]) {
+        const id = e[`${side}TransactionId`];
+        if (amount === 0 && id != null) throw Error("Zero gambling amount cannot link a transaction.");
+        if (amount > 0) {
+          const t = raw.transactions.find((x) => x.id === id);
+          if (!id || links.has(id) || !t || t.type !== type ||
+            t.status !== (type === "Expense" ? "Paid" : "Received") || t.amountCents !== amount ||
+            (type === "Income" && t.paydayCycle) ||
+            (id === `gambling:${e.id}:${side}` && t.gamblingEntryId !== e.id))
+            throw Error("Backup contains an invalid gambling ledger link.");
+          links.add(id);
+        }
+      }
     }
   }
   return raw;
