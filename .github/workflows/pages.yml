@@ -28,7 +28,11 @@ jobs:
         with:
           node-version: '22'
       - name: Test and build
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
         run: |
+          npm ci
           npm test
           npm run build
       - name: Configure Pages

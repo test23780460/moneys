@@ -24,6 +24,34 @@
   --blue: #80b8e8;
   --amber: #e4bd83;
 }
+.sync-status {
+  color: var(--muted, #9aa5ac);
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.sync-status[data-state="synced"] { color: #7bd7b0; }
+.sync-status[data-state="offline"],
+.sync-status[data-state="sync-conflict"],
+.sync-status[data-state="sync-error"] { color: #f4b37c; }
+.auth-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 30px;
+  padding: 24px;
+  background: #0b0e13;
+}
+.auth-brand { display: flex; align-items: center; gap: 12px; font-size: 25px; font-weight: 700; }
+.auth-panel { width: min(100%, 430px); padding: 30px; }
+.auth-panel h1 { margin: 8px 0; font-size: 28px; }
+.auth-panel > p { color: #9aa5ac; margin-bottom: 25px; }
+.auth-panel .form-stack .btn { width: 100%; }
+.auth-links { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 18px; }
 
 .spark-bars {
   display: flex;

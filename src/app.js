@@ -19,14 +19,17 @@ import {
   parseCsv,
   dateObj,
   FREQUENCIES,
-} from "./finance.js?v=4";
+} from "./finance.js";
 import {
+  clearUserCache,
   freshState,
   loadState,
   saveState,
   validateBackup,
   writeThrough,
-} from "./storage.js?v=4";
+} from "./storage.js";
+import { BudgetSync, cloud, cloudEnabled } from "./cloud.js";
+import { hasFinancialData } from "./merge.js";
 
 const root = document.querySelector("#app");
 let state = freshState();
@@ -48,6 +51,15 @@ let modal = null,
   pendingSave = Promise.resolve(),
   undoStack = [],
   mobileNav = false;
+let mode = cloudEnabled ? "auth" : "guest";
+let authView = "signin";
+let currentUser = null;
+let sync = null;
+let syncStatus = cloudEnabled ? "Sign in" : "Local only";
+let syncError = "";
+let guestState = null;
+let recovery = false;
+let activationPromise = null;
 const nav = [
   ["dashboard", "Dashboard", "grid"],
   ["transactions", "Transactions", "table"],
@@ -168,17 +180,20 @@ function notify(message, bad = false) {
 }
 async function persist() {
   const snapshot = structuredClone(state);
+  const userId = mode === "cloud" ? currentUser?.id : null;
   try {
-    writeThrough(snapshot);
+    writeThrough(snapshot, userId);
   } catch (e) {
     notify(`Local backup could not be saved: ${e.message}`, true);
   }
-  pendingSave = pendingSave.catch(() => {}).then(() => saveState(snapshot));
+  pendingSave = pendingSave.catch(() => {}).then(() => saveState(snapshot, userId));
   try {
     await pendingSave;
   } catch (e) {
     notify(`Could not save: ${e.message}`, true);
   }
+  if (!userId) guestState = structuredClone(snapshot);
+  if (userId) sync?.localChanged();
 }
 function remember() {
   undoStack.push(structuredClone(state));
@@ -250,8 +265,37 @@ function forecastWeekOut(planned, bills) {
   return sum(Object.values(projected), (amount) => amount);
 }
 function render() {
+  if (mode === "auth" || recovery) {
+    root.innerHTML = authPage();
+    return;
+  }
   const active = nav.find((x) => x[0] === page) || nav[0];
-  root.innerHTML = `<div class="shell"><aside class="sidebar ${mobileNav ? "open" : ""}"><div class="brand"><span class="brand-mark">N</span><span>northstar<span class="brand-dot">.</span><small>PERSONAL FINANCE</small></span></div><div class="workspace-label">WORKSPACE</div><nav aria-label="Main navigation">${nav.map(([id, label, ico]) => `<button type="button" class="nav-item ${page === id ? "active" : ""}" data-page="${id}">${icon(ico)}<span>${label}</span>${page === id ? '<span class="nav-indicator"></span>' : ""}</button>`).join("")}</nav><div class="sidebar-bottom"><div class="privacy-note">${icon("wallet", 18)}<span>Your data stays in<br>this browser.</span></div><div class="sidebar-footer">NORTHSTAR <span>v1.0</span></div></div></aside>${mobileNav ? '<button class="mobile-scrim" data-action="toggle-nav" aria-label="Close menu"></button>' : ""}<div class="main-wrap"><header class="topbar"><div class="top-left"><button class="mobile-menu icon-button" data-action="toggle-nav" aria-label="Open menu">${icon("menu")}</button><span class="breadcrumb">Workspace</span>${icon("chevron", 14)}<strong>${active[1]}</strong></div><div class="top-actions"><button class="global-search" data-action="global-search">${icon("search", 16)}<span>Search transactions</span><kbd>Ctrl K</kbd></button><span class="top-divider"></span>${button(`${icon("plus", 16)}<span>Quick add</span>`, "quick-add", "primary")}</div></header><main class="main-content">${renderPage()}</main></div></div>${modal ? renderModal() : ""}`;
+  root.innerHTML = `<div class="shell"><aside class="sidebar ${mobileNav ? "open" : ""}"><div class="brand"><span class="brand-mark">N</span><span>northstar<span class="brand-dot">.</span><small>PERSONAL FINANCE</small></span></div><div class="workspace-label">WORKSPACE</div><nav aria-label="Main navigation">${nav.map(([id, label, ico]) => `<button type="button" class="nav-item ${page === id ? "active" : ""}" data-page="${id}">${icon(ico)}<span>${label}</span>${page === id ? '<span class="nav-indicator"></span>' : ""}</button>`).join("")}</nav><div class="sidebar-bottom"><div class="privacy-note">${icon("wallet", 18)}<span>${mode === "cloud" ? "Cloud sync with<br>local offline cache." : "Your data stays in<br>this browser."}</span></div><div class="sidebar-footer">NORTHSTAR <span>v2.0</span></div></div></aside>${mobileNav ? '<button class="mobile-scrim" data-action="toggle-nav" aria-label="Close menu"></button>' : ""}<div class="main-wrap"><header class="topbar"><div class="top-left"><button class="mobile-menu icon-button" data-action="toggle-nav" aria-label="Open menu">${icon("menu")}</button><span class="breadcrumb">Workspace</span>${icon("chevron", 14)}<strong>${active[1]}</strong></div><div class="top-actions"><span class="sync-status" title="${esc(syncError)}">${esc(syncStatus)}</span><button class="global-search" data-action="global-search">${icon("search", 16)}<span>Search transactions</span><kbd>Ctrl K</kbd></button><span class="top-divider"></span>${button(`${icon("plus", 16)}<span>Quick add</span>`, "quick-add", "primary")}</div></header><main class="main-content">${renderPage()}</main></div></div>${modal ? renderModal() : ""}`;
+}
+function authPage() {
+  const heading = recovery
+    ? ["Choose a new password", "Your reset link is ready."]
+    : authView === "register"
+      ? ["Create your account", "Your budget will sync across your devices."]
+      : authView === "reset"
+        ? ["Reset your password", "We'll send a recovery link to your email."]
+        : ["Welcome back", "Sign in to your private financial workspace."];
+  const form = recovery
+    ? `<form id="recovery-form" class="form-stack"><label>New password<input name="password" type="password" minlength="8" required autocomplete="new-password"></label><button class="btn btn-primary" type="submit">Update password</button></form>`
+    : authView === "reset"
+      ? `<form id="reset-form" class="form-stack"><label>Email<input name="email" type="email" required autocomplete="email"></label><button class="btn btn-primary" type="submit">Send reset link</button></form>`
+      : `<form id="${authView === "register" ? "register-form" : "signin-form"}" class="form-stack"><label>Email<input name="email" type="email" required autocomplete="email"></label><label>Password<input name="password" type="password" minlength="8" required autocomplete="${authView === "register" ? "new-password" : "current-password"}"></label><button class="btn btn-primary" type="submit">${authView === "register" ? "Create account" : "Sign in"}</button></form>`;
+  return `<div class="auth-shell"><div class="auth-brand"><span class="brand-mark">N</span><span>northstar<span class="brand-dot">.</span></span></div><section class="panel auth-panel"><div class="eyebrow">PERSONAL FINANCE</div><h1>${heading[0]}</h1><p>${heading[1]}</p>${form}<div class="auth-links">${authView !== "signin" && !recovery ? button("Sign in", "show-signin") : ""}${authView !== "register" && !recovery ? button("Create account", "show-register") : ""}${authView !== "reset" && !recovery ? button("Forgot password?", "show-reset") : ""}</div>${!recovery ? `<div class="divider"></div><p class="muted">${hasFinancialData(guestState || freshState()) ? "Existing records on this browser remain available. Sign in to review an import." : "You can also keep records only in this browser."}</p>${button("Continue with local data", "guest-mode")}` : ""}</section></div>`;
+}
+function setSyncStatus(value, error = "") {
+  syncStatus = value;
+  syncError = error;
+  const indicator = document.querySelector(".sync-status");
+  if (indicator) {
+    indicator.textContent = value;
+    indicator.title = error;
+    indicator.dataset.state = value.toLowerCase().replaceAll(" ", "-");
+  }
 }
 function renderPage() {
   switch (page) {
@@ -714,7 +758,10 @@ function analyticsPage() {
 }
 
 function settingsPage() {
-  return `${titleRow("PREFERENCES", "Make it yours.", "Your preferences and records are stored in this browser.")}<div class="two-col settings-grid"><section class="panel"><div class="panel-head"><div><h2>Budget preferences</h2><p>These affect display and planning</p></div></div><form id="settings-form" class="form-stack"><label>Currency<select name="currency">${["USD", "EUR", "GBP", "CAD", "AUD", "JPY"].map((x) => option(x, x, state.settings.currency)).join("")}</select></label><label>Financial week starts<select name="weekStarts">${["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((x, i) => option(String(i), x, String(state.settings.weekStarts))).join("")}</select></label><label>Starting cash balance<input name="startingBalance" inputmode="decimal" value="${(state.settings.startingBalanceCents / 100).toFixed(2)}"></label><button type="submit" class="btn btn-primary">Save preferences</button></form></section><section class="panel"><div class="panel-head"><div><h2>Categories</h2><p>Available in the transaction ledger</p></div></div><div class="category-chips">${state.categories.map((c) => `<span class="category-chip">${esc(c)}<button data-action="rename-category" data-value="${esc(c)}" aria-label="Rename ${esc(c)}">${icon("settings", 13)}</button><button data-action="delete-category" data-value="${esc(c)}" aria-label="Delete ${esc(c)}">${icon("x", 13)}</button></span>`).join("")}</div>${button(`${icon("plus", 15)} Add category`, "new-category")}</section><section class="panel"><div class="panel-head"><div><h2>Your data</h2><p>Keep a copy outside this browser</p></div></div><p class="muted">Data is saved locally with IndexedDB. It does not sync across devices, and clearing browser storage can erase it. Download backups regularly.</p><div class="button-group">${button(`${icon("download", 16)} Download JSON backup`, "backup", "primary")}${button(`${icon("upload", 16)} Restore backup`, "restore")}</div><div class="divider"></div>${button("Delete all local data", "clear-data", "danger")}</section><section class="panel"><div class="panel-head"><div><h2>Keyboard shortcuts</h2><p>Move faster through your finances</p></div></div><div class="shortcut-list"><div><span>Quick add</span><kbd>Ctrl J</kbd></div><div><span>Search ledger</span><kbd>Ctrl K</kbd></div><div><span>Undo</span><kbd>Ctrl Z</kbd></div><div><span>Navigate cells</span><kbd>Tab</kbd></div></div></section></div>`;
+  const cloudAccount = mode === "cloud"
+    ? `<section class="panel"><div class="panel-head"><div><h2>Your account</h2><p>${esc(currentUser?.email || "")}</p></div></div><form id="account-form" class="form-stack"><label>Display name<input name="displayName" maxlength="80" value="${esc(currentUser?.user_metadata?.display_name || "")}"></label><label>Email<input name="email" type="email" value="${esc(currentUser?.email || "")}" required></label><button class="btn btn-primary" type="submit">Save account</button></form><div class="button-group">${button("Change password", "change-password")}${button("Sign out", "signout")}</div><div class="divider"></div>${button("Permanently delete account", "delete-account", "danger")}</section><section class="panel"><div class="panel-head"><div><h2>Cloud synchronization</h2><p>Your signed-in budget is stored in Supabase PostgreSQL.</p></div></div><p class="muted">Status: <strong>${esc(syncStatus)}</strong>${syncError ? ` · ${esc(syncError)}` : ""}</p><p class="muted">Last confirmed: ${sync?.lastSynced ? esc(new Date(sync.lastSynced).toLocaleString()) : "Not yet"}</p><p class="muted">Offline edits stay on this device and retry automatically. A cloud conflict needs your choice before saving.</p>${sync?.conflict ? button("Review conflict", "review-conflict", "primary") : button("Retry sync", "retry-sync")}${guestState && hasFinancialData(guestState) ? `<div class="divider"></div>${button("Review local data import", "review-migration")}` : ""}</section>`
+    : `<section class="panel"><div class="panel-head"><div><h2>Cloud account</h2><p>${cloudEnabled ? "Sign in to sync between devices." : "Cloud service is not configured yet."}</p></div></div><p class="muted">Local records stay on this browser. A signed-in account uses a separate cache and private cloud document.</p>${cloudEnabled ? button("Sign in or register", "show-auth", "primary") : ""}</section>`;
+  return `${titleRow("PREFERENCES", "Make it yours.", mode === "cloud" ? "Your account and budget settings." : "Your preferences and records are stored in this browser.")}<div class="two-col settings-grid">${cloudAccount}<section class="panel"><div class="panel-head"><div><h2>Budget preferences</h2><p>These affect display and planning</p></div></div><form id="settings-form" class="form-stack"><label>Currency<select name="currency">${["USD", "EUR", "GBP", "CAD", "AUD", "JPY"].map((x) => option(x, x, state.settings.currency)).join("")}</select></label><label>Financial week starts<select name="weekStarts">${["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((x, i) => option(String(i), x, String(state.settings.weekStarts))).join("")}</select></label><label>Starting cash balance<input name="startingBalance" inputmode="decimal" value="${(state.settings.startingBalanceCents / 100).toFixed(2)}"></label><button type="submit" class="btn btn-primary">Save preferences</button></form></section><section class="panel"><div class="panel-head"><div><h2>Categories</h2><p>Available in the transaction ledger</p></div></div><div class="category-chips">${state.categories.map((c) => `<span class="category-chip">${esc(c)}<button data-action="rename-category" data-value="${esc(c)}" aria-label="Rename ${esc(c)}">${icon("settings", 13)}</button><button data-action="delete-category" data-value="${esc(c)}" aria-label="Delete ${esc(c)}">${icon("x", 13)}</button></span>`).join("")}</div>${button(`${icon("plus", 15)} Add category`, "new-category")}</section><section class="panel"><div class="panel-head"><div><h2>Your data</h2><p>Keep an independent backup outside the app</p></div></div><p class="muted">${mode === "cloud" ? "Cloud sync is not a disaster-recovery backup. Download JSON regularly. This browser also keeps an offline cache that may be readable to someone using this profile." : "Data is saved locally with IndexedDB. It does not sync across devices, and clearing browser storage can erase it."}</p><div class="button-group">${button(`${icon("download", 16)} Download JSON backup`, "backup", "primary")}${button(`${icon("upload", 16)} Restore backup`, "restore")}</div><div class="divider"></div>${button(mode === "cloud" ? "Clear this account's budget" : "Delete all local data", "clear-data", "danger")}</section><section class="panel"><div class="panel-head"><div><h2>Keyboard shortcuts</h2><p>Move faster through your finances</p></div></div><div class="shortcut-list"><div><span>Quick add</span><kbd>Ctrl J</kbd></div><div><span>Search ledger</span><kbd>Ctrl K</kbd></div><div><span>Undo</span><kbd>Ctrl Z</kbd></div><div><span>Navigate cells</span><kbd>Tab</kbd></div></div></section></div>`;
 }
 
 function renderModal() {
@@ -750,6 +797,12 @@ function modalContent() {
       return `<form id="category-form" class="form-stack"><label>Category name<input name="name" value="${esc(d.name || "")}" required maxlength="40"></label><div class="modal-actions">${button("Cancel", "close-modal")}<button type="submit" class="btn btn-primary">Save category</button></div></form>`;
     case "confirm":
       return `<p class="muted">${esc(modal.message)}</p><div class="modal-actions">${button("Cancel", "close-modal")}${button(esc(modal.confirmLabel || "Delete"), "confirm", "danger")}</div>`;
+    case "migration":
+      return `<p class="muted">We found ${modal.data.transactions.length} transactions, ${modal.data.bills.length} bills, and ${modal.data.goals.length} goals saved locally in this browser. Import adds records with new IDs to your account, keeps existing cloud records, and preserves the original local copy. Download a JSON backup first if you want an independent copy.</p><div class="import-preview">${modal.data.transactions.slice(0, 5).map((t) => `<div><span>${esc(t.date)}</span><strong>${esc(t.description)}</strong><span>${esc(t.type)}</span><strong>${fmt(t.amountCents)}</strong></div>`).join("")}</div><div class="modal-actions">${button("Later", "close-modal")}${button("Download local backup", "backup-guest")}${button("Import to account", "import-guest", "primary")}</div>`;
+    case "sync-conflict":
+      return `<p class="muted">This browser and another device changed the same ${modal.conflicts.length === 1 ? "item" : "items"}. Other independent edits can be merged. Choose which version to keep for the overlapping edits.</p><p class="muted">${esc(modal.conflicts.slice(0, 8).join(", "))}${modal.conflicts.length > 8 ? ` and ${modal.conflicts.length - 8} more` : ""}</p><div class="modal-actions">${button("Keep cloud edits", "resolve-remote")}${button("Keep this device's edits", "resolve-local", "primary")}</div>`;
+    case "password":
+      return `<form id="password-form" class="form-stack"><label>Current password<input name="currentPassword" type="password" required autocomplete="current-password"></label><label>New password<input name="password" type="password" minlength="8" required autocomplete="new-password"></label><div class="modal-actions">${button("Cancel", "close-modal")}<button type="submit" class="btn btn-primary">Update password</button></div></form>`;
     case "import":
       return `<p class="muted">${modal.rows.length} valid transaction${modal.rows.length === 1 ? "" : "s"} ready to import. Existing records will remain.</p><div class="import-preview">${modal.rows
         .slice(0, 8)
@@ -822,10 +875,153 @@ function validAmount(v, allowZero = false) {
 function formData(form) {
   return Object.fromEntries(new FormData(form));
 }
+async function applyCloudState(next) {
+  state = validateBackup(structuredClone(next));
+  state.payPlans ??= {};
+  writeThrough(state, currentUser.id);
+  await saveState(state, currentUser.id);
+  render();
+}
+async function activateUser(user) {
+  if (!user || (mode === "cloud" && currentUser?.id === user.id)) return;
+  if (activationPromise) return activationPromise;
+  activationPromise = activateUserOnce(user).finally(() => { activationPromise = null; });
+  return activationPromise;
+}
+async function activateUserOnce(user) {
+  sync?.stop();
+  currentUser = user;
+  mode = "cloud";
+  recovery = false;
+  state = await loadState(user.id);
+  state.payPlans ??= {};
+  setSyncStatus("Saving");
+  render();
+  sync = new BudgetSync(user.id, {
+    getState: () => state,
+    applyState: applyCloudState,
+    setStatus: setSyncStatus,
+    onConflict: (conflicts) => {
+      modal = { kind: "sync-conflict", title: "Review sync conflict", conflicts };
+      render();
+    },
+  });
+  await sync.start();
+  if (recovery) return;
+  if (guestState && hasFinancialData(guestState) &&
+      !localStorage.getItem(`northstar-imported-v1:${user.id}`) && !sync.conflict) {
+    modal = { kind: "migration", title: "Import existing local data", data: guestState };
+    render();
+  }
+}
+async function signOut() {
+  sync?.stop();
+  sync = null;
+  const { error } = await cloud.auth.signOut({ scope: "local" });
+  if (error) throw error;
+  currentUser = null;
+  state = freshState();
+  mode = "auth";
+  authView = "signin";
+  modal = null;
+  render();
+}
+async function importGuest() {
+  if (!sync || !guestState) return;
+  setSyncStatus("Saving");
+  const counts = await sync.importLegacy(guestState);
+  localStorage.setItem(`northstar-imported-v1:${currentUser.id}`, "verified");
+  modal = null;
+  render();
+  notify(`Imported ${counts.transactions} transactions, ${counts.bills} bills, ${counts.goals} goals. ${counts.skipped} existing IDs skipped.`);
+}
+async function deleteAccount() {
+  if (!currentUser) return;
+  const userId = currentUser.id;
+  const { data, error } = await cloud.functions.invoke("delete-account", { body: {} });
+  if (error || !data?.deleted) throw error || Error("Account deletion was not confirmed.");
+  sync?.stop();
+  sync = null;
+  await clearUserCache(userId);
+  localStorage.removeItem(`northstar-imported-v1:${userId}`);
+  await cloud.auth.signOut();
+  currentUser = null;
+  state = freshState();
+  mode = "auth";
+  modal = null;
+  render();
+  notify("Account deleted. The separate local guest copy, if any, remains in this browser.");
+}
+async function handleAccountSubmit(form) {
+  const d = formData(form);
+  try {
+    let result;
+    switch (form.id) {
+      case "signin-form":
+        result = await cloud.auth.signInWithPassword({ email: d.email.trim(), password: d.password });
+        if (result.error) throw result.error;
+        await activateUser(result.data.user);
+        return;
+      case "register-form":
+        result = await cloud.auth.signUp({
+          email: d.email.trim(), password: d.password,
+          options: { emailRedirectTo: `${location.origin}${location.pathname}` },
+        });
+        if (result.error) throw result.error;
+        if (result.data.session) await activateUser(result.data.user);
+        else notify("Check your email to confirm your account, then sign in.");
+        return;
+      case "reset-form":
+        result = await cloud.auth.resetPasswordForEmail(d.email.trim(), {
+          redirectTo: `${location.origin}${location.pathname}`,
+        });
+        if (result.error) throw result.error;
+        notify("If that email has an account, a reset link has been sent.");
+        return;
+      case "recovery-form":
+        result = await cloud.auth.updateUser({ password: d.password });
+        if (result.error) throw result.error;
+        recovery = false;
+        await activateUser(result.data.user);
+        notify("Password updated.");
+        return;
+      case "password-form":
+        result = await cloud.auth.signInWithPassword({
+          email: currentUser.email, password: d.currentPassword,
+        });
+        if (result.error) throw result.error;
+        result = await cloud.auth.updateUser({ password: d.password });
+        if (result.error) throw result.error;
+        modal = null;
+        render();
+        notify("Password updated.");
+        return;
+      case "account-form": {
+        const name = d.displayName.trim();
+        const profile = await cloud.from("profiles").update({ display_name: name }).eq("id", currentUser.id);
+        if (profile.error) throw profile.error;
+        const changes = { data: { display_name: name } };
+        if (d.email.trim() !== currentUser.email) changes.email = d.email.trim();
+        result = await cloud.auth.updateUser(changes);
+        if (result.error) throw result.error;
+        currentUser = result.data.user;
+        render();
+        notify(changes.email ? "Check your email to confirm the address change." : "Account updated.");
+        return;
+      }
+    }
+  } catch (error) {
+    notify(error.message || "Account action failed.", true);
+  }
+}
 function handleSubmit(e) {
   const form = e.target;
   if (!(form instanceof HTMLFormElement)) return;
   e.preventDefault();
+  if (["signin-form", "register-form", "reset-form", "recovery-form", "password-form", "account-form"].includes(form.id)) {
+    void handleAccountSubmit(form);
+    return;
+  }
   const d = formData(form);
   try {
     switch (form.id) {
@@ -1140,6 +1336,64 @@ function handleClick(e) {
     id = el.dataset.id,
     v = el.dataset.value;
   switch (a) {
+    case "show-signin":
+    case "show-register":
+    case "show-reset":
+      authView = a.slice(5);
+      render();
+      break;
+    case "show-auth":
+      mode = "auth";
+      authView = "signin";
+      render();
+      break;
+    case "guest-mode":
+      mode = "guest";
+      state = structuredClone(guestState || freshState());
+      render();
+      break;
+    case "signout":
+      void signOut().catch((error) => notify(error.message, true));
+      break;
+    case "change-password":
+      modal = { kind: "password", title: "Change password" };
+      render();
+      break;
+    case "delete-account":
+      confirmAction(
+        "Permanently delete account",
+        "This deletes your cloud account and its budget. Download a backup first. The separate local guest copy, if any, remains on this browser.",
+        () => void deleteAccount().catch((error) => notify(error.message, true)),
+        "Delete account",
+      );
+      break;
+    case "retry-sync":
+      void sync?.queue();
+      break;
+    case "review-conflict":
+      if (sync?.conflict) {
+        modal = { kind: "sync-conflict", title: "Review sync conflict", conflicts: ["overlapping edits"] };
+        render();
+      }
+      break;
+    case "resolve-local":
+    case "resolve-remote":
+      modal = null;
+      render();
+      void sync?.resolve(a === "resolve-local" ? "local" : "remote").catch((error) => notify(error.message, true));
+      break;
+    case "review-migration":
+      if (guestState && hasFinancialData(guestState)) {
+        modal = { kind: "migration", title: "Import existing local data", data: guestState };
+        render();
+      }
+      break;
+    case "backup-guest":
+      if (guestState) download(`northstar-local-backup-${today()}.json`, JSON.stringify(guestState, null, 2), "application/json");
+      break;
+    case "import-guest":
+      void importGuest().catch((error) => notify(error.message, true));
+      break;
     case "toggle-nav":
       mobileNav = !mobileNav;
       render();
@@ -1398,8 +1652,8 @@ function handleClick(e) {
       break;
     case "clear-data":
       confirmAction(
-        "Delete all local data",
-        "This permanently clears transactions, bills, goals, allocations, and preferences in this browser. Download a backup first if you may need them.",
+        mode === "cloud" ? "Clear account budget" : "Delete all local data",
+        mode === "cloud" ? "This clears this account's transactions, bills, goals, plans, and preferences, then syncs the empty budget to the cloud. Download a backup first." : "This permanently clears transactions, bills, goals, allocations, and preferences in this browser. Download a backup first if you may need them.",
         () => {
           remember();
           state = freshState();
@@ -1546,7 +1800,9 @@ document
       const restored = validateBackup(JSON.parse(await file.text()));
       confirmAction(
         "Restore backup",
-        "This replaces all current local data in this browser. Download a backup first if you need the current records.",
+        mode === "cloud"
+          ? "This replaces this account's budget on this device and syncs it to the cloud. Download a backup first if you need the current records."
+          : "This replaces all current local data in this browser. Download a backup first if you need the current records.",
         () => {
           remember();
           state = restored;
@@ -1560,13 +1816,42 @@ document
     }
   });
 try {
-  state = await loadState();
-  state.payPlans ??= {};
-} catch (err) {
-  notify(
-    "Local storage is unavailable. Changes may not persist in this browser.",
-    true,
-  );
+  guestState = await loadState();
+  guestState.payPlans ??= {};
+  state = structuredClone(guestState);
+} catch {
+  guestState = freshState();
+  state = structuredClone(guestState);
+  notify("Local storage is unavailable. Changes may not persist in this browser.", true);
 }
 selectedWeek = weekStart(today(), state.settings.weekStarts);
-render();
+if (cloudEnabled) {
+  cloud.auth.onAuthStateChange((event, session) => {
+    setTimeout(() => {
+      if (event === "PASSWORD_RECOVERY") {
+        sync?.stop();
+        sync = null;
+        recovery = true;
+        currentUser = session?.user || null;
+        mode = "auth";
+        render();
+      } else if (event === "SIGNED_IN" && session?.user && !recovery) {
+        void activateUser(session.user).catch((error) => notify(error.message, true));
+      } else if (event === "SIGNED_OUT" && mode === "cloud") {
+        sync?.stop();
+        sync = null;
+        currentUser = null;
+        state = freshState();
+        mode = "auth";
+        render();
+      }
+    }, 0);
+  });
+  const { data, error } = await cloud.auth.getSession();
+  if (error) notify(error.message, true);
+  if (data.session?.user && !recovery) await activateUser(data.session.user);
+  else render();
+} else {
+  mode = "guest";
+  render();
+}

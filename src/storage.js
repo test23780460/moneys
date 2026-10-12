@@ -2,6 +2,9 @@ import { DEFAULT_CATEGORIES, today } from "./finance.js";
 const DB = "northstar-budget-v1";
 const KEY = "budget";
 const SNAPSHOT = "northstar-budget-write-through-v1";
+const syncKey = (userId) => `northstar-sync-base-v1:${userId}`;
+const stateKey = (userId) => (userId ? `${KEY}:${userId}` : KEY);
+const snapshotKey = (userId) => (userId ? `${SNAPSHOT}:${userId}` : SNAPSHOT);
 export const freshState = () => ({
   version: 1,
   transactions: [],
@@ -26,10 +29,10 @@ function openDb() {
     });
   return dbPromise;
 }
-export async function loadState() {
+export async function loadState(userId = null) {
   let latest;
   try {
-    latest = JSON.parse(localStorage.getItem(SNAPSHOT));
+    latest = JSON.parse(localStorage.getItem(snapshotKey(userId)));
     if (latest) validateBackup(latest);
   } catch {
     latest = null;
@@ -38,19 +41,45 @@ export async function loadState() {
   const db = await openDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction("app", "readonly");
-    const req = tx.objectStore("app").get(KEY);
+    const req = tx.objectStore("app").get(stateKey(userId));
     req.onsuccess = () => resolve(req.result || freshState());
     req.onerror = () => reject(req.error);
   });
 }
-export function writeThrough(state) {
-  localStorage.setItem(SNAPSHOT, JSON.stringify(state));
+export function writeThrough(state, userId = null) {
+  localStorage.setItem(snapshotKey(userId), JSON.stringify(state));
 }
-export async function saveState(state) {
+export async function saveState(state, userId = null) {
   const db = await openDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction("app", "readwrite");
-    tx.objectStore("app").put(state, KEY);
+    tx.objectStore("app").put(state, stateKey(userId));
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+export function loadSyncBase(userId) {
+  try {
+    const value = JSON.parse(localStorage.getItem(syncKey(userId)));
+    if (value && Number.isSafeInteger(value.revision)) {
+      validateBackup(value.state);
+      return value;
+    }
+  } catch {
+    // A damaged sync marker must never replace financial records.
+  }
+  return null;
+}
+export function saveSyncBase(userId, revision, state) {
+  localStorage.setItem(syncKey(userId), JSON.stringify({ revision, state }));
+}
+export async function clearUserCache(userId) {
+  localStorage.removeItem(snapshotKey(userId));
+  localStorage.removeItem(syncKey(userId));
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("app", "readwrite");
+    tx.objectStore("app").delete(stateKey(userId));
     tx.oncomplete = resolve;
     tx.onerror = () => reject(tx.error);
   });

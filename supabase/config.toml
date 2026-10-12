@@ -1,0 +1,5 @@
+[functions.delete-account]
+# The handler validates the caller's Supabase JWT with auth.getUser before
+# using the server-side secret key. The legacy gateway check cannot validate
+# new publishable keys.
+verify_jwt = false
