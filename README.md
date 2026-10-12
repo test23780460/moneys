@@ -6,19 +6,22 @@ Northstar is a dark, spreadsheet-style budget app for paychecks, expenses, weekl
 
 Open the live site, add a paycheck or expense with **Quick add**, and use the ledger for editing, filtering, CSV import/export, and spreadsheet paste. Settings contains JSON backup/restore, category and currency preferences, and account controls when Supabase is configured.
 
+**Weekly Payday Check-In** opens at the configured weekday and local time (Wednesday at 6:00 PM by default) for signed-in accounts. It also detects an unrecorded payday when the app opens later. The top-bar payday button and the weekly budget page open it manually; the date field can backfill an earlier payday. Enter actual take-home pay to preview upcoming bills, optional sinking fund reserves, category allocation rules, savings, and remaining money. The preview never marks a bill paid or transfers savings. **Remind me later** defers the automatic prompt for four hours; **Skip this week** suppresses that cycle. Settings can change the weekday, time, IANA time zone, automatic prompts, and fixed/percentage allocation rules with priority order. Recurring bills have an optional number of paychecks for sinking fund planning. Existing hand-entered weekly allocations remain untouched. The feature uses in-app prompts, not browser push notifications.
+
 The published site starts with no personal financial records. Never commit real records or credentials to this repository.
 
 ## Architecture
 
 - `src/finance.js`: integer-cent calculations and date rules.
+- `src/payday.js`: time-zone-aware payday cycles, reminder eligibility, idempotent paycheck records, bill reserve and allocation recommendations, and paycheck history.
 - `src/storage.js`: IndexedDB cache plus a write-through browser snapshot. Guest and signed-in caches have separate keys.
 - `src/cloud.js`: Supabase Auth, a Realtime subscription, periodic/online retries, optimistic revision writes, and conflict handling.
 - `src/merge.js`: three-way merge by transaction/bill/goal ID and by budget cell. Two devices can add different records without duplicating them. If both edit the same field or record differently, the app asks which edits to keep.
-- `supabase/migrations/`: PostgreSQL tables, per-user Row Level Security, validated versioned document writes, profile creation, Realtime publication, and a follow-up validator fix.
+- `supabase/migrations/`: PostgreSQL tables, per-user Row Level Security, validated versioned document writes, profile creation, Realtime publication, and payday document validation.
 - `supabase/functions/delete-account/index.ts`: authenticated deletion of the Auth user and cascading budget data. The privileged key stays inside Supabase Edge Functions.
 - `supabase/verify_rls.sql`: rollback-only checks for owner access, cross-user isolation, document validation, and denied direct writes.
 
-The financial document is the cloud source of truth for a signed-in account. Its JSONB schema matches the existing app state: transactions include income, expenses, bill payments, and savings transfers; bills store schedules; goals store movements; `allocations` and `payPlans` store weekly budgets; categories and settings are included. Monthly views and totals are derived from dated transactions rather than stored twice. A revision number protects every write from overwriting concurrent changes. The server validates document shape, cents, statuses, dates, ID uniqueness, and size. PostgreSQL RLS limits reads to the authenticated owner; direct browser writes are revoked and go through a user-bound save function.
+The financial document is the cloud source of truth for a signed-in account. Its JSONB schema matches the app state: transactions include income, expenses, bill payments, and savings transfers; bills store schedules; goals store movements; `allocations` and `payPlans` store weekly budgets; `payday` stores the schedule, allocation rules, and per-cycle check-in status; categories and settings are included. Paycheck records use stable `payday:YYYY-MM-DD` IDs so retrying or editing a cycle updates one transaction. Monthly views and totals are derived from dated transactions rather than stored twice. A revision number protects every write from overwriting concurrent changes. The server validates document shape, cents, statuses, dates, ID uniqueness, and size. PostgreSQL RLS limits reads to the authenticated owner; direct browser writes are revoked and go through a user-bound save function.
 
 ## Offline and migration behavior
 
@@ -48,7 +51,7 @@ Open `http://127.0.0.1:8000`. The default build has no cloud configuration and k
 4. Set GitHub repository **Actions variables** `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` to the project's HTTPS URL and its publishable key. Do not use GitHub secrets for these public browser values. Never put a secret/service-role key in these variables.
 5. Push to `main`. `.github/workflows/pages.yml` runs `npm ci`, tests, builds, and deploys to GitHub Pages. Future frontend pushes deploy automatically.
 
-The NorthStar project `qywomqsrelqgqddfofoa` has both migrations and the Edge Function deployed. Its URL and publishable key are set as GitHub Actions variables. Supabase's default mail service only sends to members of the Supabase organization, so **configure custom SMTP before offering registration or password reset to other addresses**. Keep email confirmation enabled. Account deletion requires the Edge Function to remain deployed. The database password is never needed by the browser or GitHub Pages.
+The NorthStar project `qywomqsrelqgqddfofoa` has the original backend migrations and the Edge Function deployed. Apply the payday validation migration before publishing this new frontend. Its URL and publishable key are set as GitHub Actions variables. Supabase's default mail service only sends to members of the Supabase organization, so **configure custom SMTP before offering registration or password reset to other addresses**. Keep email confirmation enabled. Account deletion requires the Edge Function to remain deployed. The database password is never needed by the browser or GitHub Pages.
 
 ## Security checks before using real finances
 

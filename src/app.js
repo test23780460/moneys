@@ -30,6 +30,7 @@ import {
 } from "./storage.js";
 import { BudgetSync, cloud, cloudEnabled } from "./cloud.js";
 import { hasFinancialData } from "./merge.js";
+import { defaultPayday, latestDuePayday, cycleForDate, missedPaydays, paydayPlan, paycheckHistory, recordPaycheck, shouldPromptPayday, validTimeZone, zonedNow } from "./payday.js";
 
 const root = document.querySelector("#app");
 let state = freshState();
@@ -60,6 +61,17 @@ let syncError = "";
 let guestState = null;
 let recovery = false;
 let activationPromise = null;
+const paydayConfig = () => ({ ...defaultPayday(), ...state.payday, checkins: state.payday?.checkins || {}, rules: state.payday?.rules || [] });
+const paydayState = () => (state.payday ||= paydayConfig());
+function currentPaydayCycle() {
+  return latestDuePayday(new Date(), paydayConfig());
+}
+function checkPaydayPrompt() {
+  if (mode !== "cloud" || modal || !["Synced", "Offline"].includes(syncStatus)) return;
+  const p = paydayConfig();
+  const cycle = shouldPromptPayday(new Date(), p, state.transactions, p.checkins, state.createdAt);
+  if (cycle) openPayday(cycle, true);
+}
 const nav = [
   ["dashboard", "Dashboard", "grid"],
   ["transactions", "Transactions", "table"],
@@ -246,9 +258,11 @@ function goalSaved(goal) {
 function allocationsFor(week) {
   return state.allocations[week] || {};
 }
-function estimatedPay() {
-  const incomes = state.transactions.filter(
-    (t) => t.type === "Income" && actual(t) && t.date >= addDays(today(), -84),
+function estimatedPay(excludeWeek = null) {
+  const paycheckRows = state.transactions.filter((t) => t.paydayCycle && t.type === "Income" && actual(t));
+  const incomes = (paycheckRows.length ? paycheckRows : state.transactions).filter(
+    (t) => t.type === "Income" && actual(t) && t.date >= addDays(today(), -84) &&
+      (!excludeWeek || weekStart(t.date, state.settings.weekStarts) !== excludeWeek),
   );
   const weeks = new Set(
     incomes.map((t) => weekStart(t.date, state.settings.weekStarts)),
@@ -264,13 +278,29 @@ function forecastWeekOut(planned, bills) {
   }
   return sum(Object.values(projected), (amount) => amount);
 }
+function paydayPreview(cycle, amountCents) {
+  return paydayPlan(amountCents, state.bills, paydayConfig().rules, cycle);
+}
+function paydayPlanHtml(plan, amountCents) {
+  const scale = Math.max(1, amountCents);
+  const billWidth = Math.min(100, (plan.reserveCents / scale) * 100);
+  const savedWidth = Math.min(100 - billWidth, (plan.savingsCents / scale) * 100);
+  const spendWidth = Math.max(0, Math.min(100 - billWidth - savedWidth, (plan.spendingCents / scale) * 100));
+  return `<div class="payday-breakdown" aria-label="Suggested paycheck breakdown"><span class="bills" style="width:${billWidth}%"></span><span class="savings" style="width:${savedWidth}%"></span><span class="spending" style="width:${spendWidth}%"></span></div><div class="payday-legend"><span><i class="dot amber"></i> Bills</span><span><i class="dot violet"></i> Savings</span><span><i class="dot green"></i> Available</span></div><div class="payday-facts"><div><span>Bills before next payday</span><strong>${fmt(plan.dueCents)}</strong></div><div><span>Optional sinking funds</span><strong>${fmt(plan.sinkingCents)}</strong></div><div><span>Suggested bill reserves</span><strong>${fmt(plan.reserveCents)}</strong></div><div><span>After bill reservations</span><strong class="${plan.afterBillsCents < 0 ? "negative" : ""}">${fmt(plan.afterBillsCents)}</strong></div><div><span>Planned savings</span><strong>${fmt(plan.savingsCents)}</strong></div><div><span>Spending allowance</span><strong>${fmt(plan.spendingCents)}</strong></div><div><span>Unallocated money</span><strong>${fmt(plan.unallocatedCents)}</strong></div>${plan.shortageCents ? `<div class="negative"><span>Shortage or plan adjustments needed</span><strong>${fmt(plan.shortageCents)}</strong></div>` : ""}</div>${plan.due.length ? `<p class="muted">Due before ${shortDate(plan.nextPayday)}: ${plan.due.map((bill) => `${esc(bill.name)} ${fmt(bill.amountCents)}`).join(" · ")}</p>` : '<p class="muted">No bills due before the next payday.</p>'}${plan.allocations.length ? `<div class="payday-rule-preview">${plan.allocations.map((a) => `<div><span>${esc(a.category)} · priority ${a.priority}</span><strong>${fmt(a.suggestedCents)}${a.shortCents ? ` <small class="negative">${fmt(a.shortCents)} short</small>` : ""}</strong></div>`).join("")}</div>` : ""}<p class="muted">Recommendations are plans. No bill is marked paid and no savings is transferred.</p>`;
+}
+function paydayPanel(cycle = currentPaydayCycle()) {
+  const paycheck = state.transactions.find((t) => t.paydayCycle === cycle && t.type === "Income" && t.status === "Received");
+  const plan = paycheck ? paydayPreview(cycle, paycheck.amountCents) : null;
+  const missed = missedPaydays(new Date(), paydayConfig(), state.transactions, paydayConfig().checkins, 8, addDays(state.createdAt, -7));
+  return `<section class="panel payday-panel"><div class="panel-head"><div><div class="eyebrow">PAYDAY ROUTINE</div><h2>${paycheck ? "Your payday plan" : "Ready for your next check-in"}</h2><p>${paycheck ? `Actual take-home pay ${fmt(paycheck.amountCents)} · ${shortDate(cycle)}` : `Payday ${shortDate(cycle)} · ${esc(paydayConfig().timeZone)}`}</p></div>${button(paycheck ? "Review check-in" : "Enter paycheck", "open-payday", "primary", `data-value="${cycle}"`)}</div>${plan ? paydayPlanHtml(plan, paycheck.amountCents) : `<p class="muted">Enter your actual pay to see bill reserves and a flexible plan. A forecast never counts as received income.</p>`}${missed.length ? `<p class="muted">${missed.length} recent payday${missed.length === 1 ? "" : "s"} available to backfill from the check-in.</p>` : ""}</section>`;
+}
 function render() {
   if (mode === "auth" || recovery) {
     root.innerHTML = authPage();
     return;
   }
   const active = nav.find((x) => x[0] === page) || nav[0];
-  root.innerHTML = `<div class="shell"><aside class="sidebar ${mobileNav ? "open" : ""}"><div class="brand"><span class="brand-mark">N</span><span>northstar<span class="brand-dot">.</span><small>PERSONAL FINANCE</small></span></div><div class="workspace-label">WORKSPACE</div><nav aria-label="Main navigation">${nav.map(([id, label, ico]) => `<button type="button" class="nav-item ${page === id ? "active" : ""}" data-page="${id}">${icon(ico)}<span>${label}</span>${page === id ? '<span class="nav-indicator"></span>' : ""}</button>`).join("")}</nav><div class="sidebar-bottom"><div class="privacy-note">${icon("wallet", 18)}<span>${mode === "cloud" ? "Cloud sync with<br>local offline cache." : "Your data stays in<br>this browser."}</span></div><div class="sidebar-footer">NORTHSTAR <span>v2.0</span></div></div></aside>${mobileNav ? '<button class="mobile-scrim" data-action="toggle-nav" aria-label="Close menu"></button>' : ""}<div class="main-wrap"><header class="topbar"><div class="top-left"><button class="mobile-menu icon-button" data-action="toggle-nav" aria-label="Open menu">${icon("menu")}</button><span class="breadcrumb">Workspace</span>${icon("chevron", 14)}<strong>${active[1]}</strong></div><div class="top-actions"><span class="sync-status" title="${esc(syncError)}">${esc(syncStatus)}</span><button class="global-search" data-action="global-search">${icon("search", 16)}<span>Search transactions</span><kbd>Ctrl K</kbd></button><span class="top-divider"></span>${button(`${icon("plus", 16)}<span>Quick add</span>`, "quick-add", "primary")}</div></header><main class="main-content">${renderPage()}</main></div></div>${modal ? renderModal() : ""}`;
+  root.innerHTML = `<div class="shell"><aside class="sidebar ${mobileNav ? "open" : ""}"><div class="brand"><span class="brand-mark">N</span><span>northstar<span class="brand-dot">.</span><small>PERSONAL FINANCE</small></span></div><div class="workspace-label">WORKSPACE</div><nav aria-label="Main navigation">${nav.map(([id, label, ico]) => `<button type="button" class="nav-item ${page === id ? "active" : ""}" data-page="${id}">${icon(ico)}<span>${label}</span>${page === id ? '<span class="nav-indicator"></span>' : ""}</button>`).join("")}</nav><div class="sidebar-bottom"><div class="privacy-note">${icon("wallet", 18)}<span>${mode === "cloud" ? "Cloud sync with<br>local offline cache." : "Your data stays in<br>this browser."}</span></div><div class="sidebar-footer">NORTHSTAR <span>v2.1</span></div></div></aside>${mobileNav ? '<button class="mobile-scrim" data-action="toggle-nav" aria-label="Close menu"></button>' : ""}<div class="main-wrap"><header class="topbar"><div class="top-left"><button class="mobile-menu icon-button" data-action="toggle-nav" aria-label="Open menu">${icon("menu")}</button><span class="breadcrumb">Workspace</span>${icon("chevron", 14)}<strong>${active[1]}</strong></div><div class="top-actions"><span class="sync-status" title="${esc(syncError)}">${esc(syncStatus)}</span>${button(`${icon("spark", 15)}<span>Payday check-in</span>`, "open-payday", "secondary", 'aria-label="Open payday check-in"') }<button class="global-search" data-action="global-search">${icon("search", 16)}<span>Search transactions</span><kbd>Ctrl K</kbd></button><span class="top-divider"></span>${button(`${icon("plus", 16)}<span>Quick add</span>`, "quick-add", "primary")}</div></header><main class="main-content">${renderPage()}</main></div></div>${modal ? renderModal() : ""}`;
 }
 function authPage() {
   const heading = recovery
@@ -296,6 +326,9 @@ function setSyncStatus(value, error = "") {
     indicator.title = error;
     indicator.dataset.state = value.toLowerCase().replaceAll(" ", "-");
   }
+  const paydayIndicator = document.querySelector(".payday-sync-state");
+  if (paydayIndicator) paydayIndicator.textContent = mode !== "cloud" ? "Saved on this browser only" : value === "Synced" ? "Saved to cloud" : value === "Offline" ? "Pending sync · offline" : value === "Saving" ? "Saving to cloud…" : value;
+  if (value === "Synced" || value === "Offline") setTimeout(checkPaydayPrompt, 0);
 }
 function renderPage() {
   switch (page) {
@@ -548,12 +581,12 @@ function weeklyPage() {
     bills = upcomingBills(range),
     planned = allocationsFor(start),
     plannedTotal = sum(Object.values(planned), (x) => x),
-    expected = state.payPlans?.[start] ?? estimatedPay(),
+    expected = state.payPlans?.[start] ?? estimatedPay(start),
     forecastIncome = m.income || expected,
     forecastOut = forecastWeekOut(planned, bills),
     previousPlan = allocationsFor(addDays(start, -7));
   const actions = `${button(`${icon("plus", 16)} Add allocation`, "new-allocation", "primary")}${button("Set expected pay", "set-expected-pay")}${Object.keys(previousPlan).length ? button("Use last week's plan", "copy-plan") : ""}`;
-  return `${titleRow("WEEKLY PLAN", "Make this week count.", "Plan your paycheck before it disappears into the details.", actions)}<div class="period-controls"><div class="date-step">${button("‹", "prev-week")}<span>${shortDate(start)} – ${niceDate(end)}</span>${button("›", "next-week")}</div><span class="muted">Week starts ${["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][state.settings.weekStarts]}</span></div><div class="stats-grid four">${card(state.payPlans?.[start] == null ? "Estimated pay · history" : "Expected pay · your plan", fmt(expected), "arrow", "green")}${card("Actual income", fmt(m.income), "wallet", "blue")}${card("Planned outflow", fmt(forecastOut), "receipt", "amber")}${card("Actual remaining", fmt(m.remaining), "target", m.remaining < 0 ? "rose" : "green")}</div><div class="two-col"><section class="panel"><div class="panel-head"><div><h2>Category allocations</h2><p>Planning does not change your cash balance</p></div></div>${
+  return `${titleRow("WEEKLY PLAN", "Make this week count.", "Plan your paycheck before it disappears into the details.", actions)}<div class="period-controls"><div class="date-step">${button("‹", "prev-week")}<span>${shortDate(start)} – ${niceDate(end)}</span>${button("›", "next-week")}</div><span class="muted">Week starts ${["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][state.settings.weekStarts]}</span></div><div class="stats-grid four">${card(state.payPlans?.[start] != null ? "Expected pay · your plan" : expected ? "Estimated pay · history" : "No pay forecast", fmt(expected), "arrow", "green")}${card("Actual income", fmt(m.income), "wallet", "blue")}${card("Planned outflow", fmt(forecastOut), "receipt", "amber")}${card("Actual remaining", fmt(m.remaining), "target", m.remaining < 0 ? "rose" : "green")}</div>${paydayPanel(cycleForDate(addDays(start, 6), paydayConfig().weekday))}<div class="two-col"><section class="panel"><div class="panel-head"><div><h2>Category allocations</h2><p>Planning does not change your cash balance</p></div></div>${
     Object.keys(planned).length
       ? `<div class="allocation-list">${Object.entries(planned)
           .map(([cat, amount]) => {
@@ -569,7 +602,7 @@ function weeklyPage() {
           "new-allocation",
           "Add allocation",
         )
-  }<div class="panel-total"><span>Unallocated from income plan</span><strong>${fmt(forecastIncome - forecastOut)}</strong></div></section><section class="panel"><div class="panel-head"><div><h2>This week</h2><p>Actual entries and obligations</p></div></div><div class="insights"><div><span>Forecast remaining</span><strong>${fmt(forecastIncome - forecastOut)}</strong></div><div><span>Actual expenses</span><strong>${fmt(m.expenses)}</strong></div><div><span>Savings transfers</span><strong>${fmt(m.savings)}</strong></div><div><span>Over / under plan</span><strong class="${plannedTotal - m.expenses >= 0 ? "positive" : "negative"}">${fmt(plannedTotal - m.expenses)}</strong></div></div><h3 class="subheading">Bills due</h3>${bills.length ? bills.map((b) => `<div class="mini-row"><span class="mini-icon">${icon("receipt", 16)}</span><div><strong>${esc(b.name)}</strong><small>${shortDate(b.due)}</small></div><strong>${fmt(b.amountCents)}</strong></div>`).join("") : '<p class="muted compact">No bills due this week.</p>'}</section></div>${incomeHistory()}`;
+  }<div class="panel-total"><span>Unallocated from income plan</span><strong>${fmt(forecastIncome - forecastOut)}</strong></div></section><section class="panel"><div class="panel-head"><div><h2>This week</h2><p>Actual entries and obligations</p></div></div><div class="insights"><div><span>Forecast remaining</span><strong>${fmt(forecastIncome - forecastOut)}</strong></div><div><span>Actual expenses</span><strong>${fmt(m.expenses)}</strong></div><div><span>Savings transfers</span><strong>${fmt(m.savings)}</strong></div><div><span>Over / under plan</span><strong class="${plannedTotal - m.expenses >= 0 ? "positive" : "negative"}">${fmt(plannedTotal - m.expenses)}</strong></div></div><h3 class="subheading">Bills due</h3>${bills.length ? bills.map((b) => `<div class="mini-row"><span class="mini-icon">${icon("receipt", 16)}</span><div><strong>${esc(b.name)}</strong><small>${shortDate(b.due)}</small></div><strong>${fmt(b.amountCents)}</strong></div>`).join("") : '<p class="muted compact">No bills due this week.</p>'}</section></div>${incomeHistory()}${paydayHistorySection()}`;
 }
 function incomeHistory() {
   const paychecks = state.transactions
@@ -598,6 +631,13 @@ function incomeHistory() {
           "Add income",
         )
   }</section>`;
+}
+
+function paydayHistorySection() {
+  const history = paycheckHistory(state.transactions, zonedNow(new Date(), paydayConfig().timeZone).date);
+  const missed = missedPaydays(new Date(), paydayConfig(), state.transactions, paydayConfig().checkins, 16, addDays(state.createdAt, -7));
+  const backfill = missed.find((date) => date !== currentPaydayCycle()) || addDays(currentPaydayCycle(), -7);
+  return `<section class="panel income-history"><div class="panel-head"><div><h2>Paycheck history</h2><p>Confirmed take-home pay, separate from income forecasts</p></div>${button("Backfill a paycheck", "open-payday", "secondary", `data-value="${backfill}"`)}</div>${history.rows.length ? `<div class="stats-grid three">${card("Average paycheck", fmt(history.averageCents), "arrow", "green")}${card("Received this month", fmt(history.monthToDateCents), "wallet", "blue")}${card("Recorded paychecks", String(history.rows.length), "calendar", "violet")}</div><div class="paycheck-history">${history.rows.slice(0, 12).map((row) => `<div class="mini-row"><div><strong>${shortDate(row.date)}</strong><small>${esc(row.notes || "Paycheck")}</small></div><strong>${fmt(row.amountCents)}</strong><span class="${row.changeCents == null ? "muted" : row.changeCents < 0 ? "negative" : "positive"}">${row.changeCents == null ? "—" : `${row.changeCents >= 0 ? "+" : ""}${fmt(row.changeCents)}`}</span>${button("Edit", "open-payday", "secondary", `data-value="${row.paydayCycle}"`)}</div>`).join("")}</div>` : '<p class="muted">No completed payday check-ins yet.</p>'}</section>`;
 }
 
 function monthlyPage() {
@@ -761,16 +801,34 @@ function settingsPage() {
   const cloudAccount = mode === "cloud"
     ? `<section class="panel"><div class="panel-head"><div><h2>Your account</h2><p>${esc(currentUser?.email || "")}</p></div></div><form id="account-form" class="form-stack"><label>Display name<input name="displayName" maxlength="80" value="${esc(currentUser?.user_metadata?.display_name || "")}"></label><label>Email<input name="email" type="email" value="${esc(currentUser?.email || "")}" required></label><button class="btn btn-primary" type="submit">Save account</button></form><div class="button-group">${button("Change password", "change-password")}${button("Sign out", "signout")}</div><div class="divider"></div>${button("Permanently delete account", "delete-account", "danger")}</section><section class="panel"><div class="panel-head"><div><h2>Cloud synchronization</h2><p>Your signed-in budget is stored in Supabase PostgreSQL.</p></div></div><p class="muted">Status: <strong>${esc(syncStatus)}</strong>${syncError ? ` · ${esc(syncError)}` : ""}</p><p class="muted">Last confirmed: ${sync?.lastSynced ? esc(new Date(sync.lastSynced).toLocaleString()) : "Not yet"}</p><p class="muted">Offline edits stay on this device and retry automatically. A cloud conflict needs your choice before saving.</p>${sync?.conflict ? button("Review conflict", "review-conflict", "primary") : button("Retry sync", "retry-sync")}${guestState && hasFinancialData(guestState) ? `<div class="divider"></div>${button("Review local data import", "review-migration")}` : ""}</section>`
     : `<section class="panel"><div class="panel-head"><div><h2>Cloud account</h2><p>${cloudEnabled ? "Sign in to sync between devices." : "Cloud service is not configured yet."}</p></div></div><p class="muted">Local records stay on this browser. A signed-in account uses a separate cache and private cloud document.</p>${cloudEnabled ? button("Sign in or register", "show-auth", "primary") : ""}</section>`;
-  return `${titleRow("PREFERENCES", "Make it yours.", mode === "cloud" ? "Your account and budget settings." : "Your preferences and records are stored in this browser.")}<div class="two-col settings-grid">${cloudAccount}<section class="panel"><div class="panel-head"><div><h2>Budget preferences</h2><p>These affect display and planning</p></div></div><form id="settings-form" class="form-stack"><label>Currency<select name="currency">${["USD", "EUR", "GBP", "CAD", "AUD", "JPY"].map((x) => option(x, x, state.settings.currency)).join("")}</select></label><label>Financial week starts<select name="weekStarts">${["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((x, i) => option(String(i), x, String(state.settings.weekStarts))).join("")}</select></label><label>Starting cash balance<input name="startingBalance" inputmode="decimal" value="${(state.settings.startingBalanceCents / 100).toFixed(2)}"></label><button type="submit" class="btn btn-primary">Save preferences</button></form></section><section class="panel"><div class="panel-head"><div><h2>Categories</h2><p>Available in the transaction ledger</p></div></div><div class="category-chips">${state.categories.map((c) => `<span class="category-chip">${esc(c)}<button data-action="rename-category" data-value="${esc(c)}" aria-label="Rename ${esc(c)}">${icon("settings", 13)}</button><button data-action="delete-category" data-value="${esc(c)}" aria-label="Delete ${esc(c)}">${icon("x", 13)}</button></span>`).join("")}</div>${button(`${icon("plus", 15)} Add category`, "new-category")}</section><section class="panel"><div class="panel-head"><div><h2>Your data</h2><p>Keep an independent backup outside the app</p></div></div><p class="muted">${mode === "cloud" ? "Cloud sync is not a disaster-recovery backup. Download JSON regularly. This browser also keeps an offline cache that may be readable to someone using this profile." : "Data is saved locally with IndexedDB. It does not sync across devices, and clearing browser storage can erase it."}</p><div class="button-group">${button(`${icon("download", 16)} Download JSON backup`, "backup", "primary")}${button(`${icon("upload", 16)} Restore backup`, "restore")}</div><div class="divider"></div>${button(mode === "cloud" ? "Clear this account's budget" : "Delete all local data", "clear-data", "danger")}</section><section class="panel"><div class="panel-head"><div><h2>Keyboard shortcuts</h2><p>Move faster through your finances</p></div></div><div class="shortcut-list"><div><span>Quick add</span><kbd>Ctrl J</kbd></div><div><span>Search ledger</span><kbd>Ctrl K</kbd></div><div><span>Undo</span><kbd>Ctrl Z</kbd></div><div><span>Navigate cells</span><kbd>Tab</kbd></div></div></section></div>`;
+  return `${titleRow("PREFERENCES", "Make it yours.", mode === "cloud" ? "Your account and budget settings." : "Your preferences and records are stored in this browser.")}<div class="two-col settings-grid">${cloudAccount}${paydaySettingsPanel()}<section class="panel"><div class="panel-head"><div><h2>Budget preferences</h2><p>These affect display and planning</p></div></div><form id="settings-form" class="form-stack"><label>Currency<select name="currency">${["USD", "EUR", "GBP", "CAD", "AUD", "JPY"].map((x) => option(x, x, state.settings.currency)).join("")}</select></label><label>Financial week starts<select name="weekStarts">${["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((x, i) => option(String(i), x, String(state.settings.weekStarts))).join("")}</select></label><label>Starting cash balance<input name="startingBalance" inputmode="decimal" value="${(state.settings.startingBalanceCents / 100).toFixed(2)}"></label><button type="submit" class="btn btn-primary">Save preferences</button></form></section><section class="panel"><div class="panel-head"><div><h2>Categories</h2><p>Available in the transaction ledger</p></div></div><div class="category-chips">${state.categories.map((c) => `<span class="category-chip">${esc(c)}<button data-action="rename-category" data-value="${esc(c)}" aria-label="Rename ${esc(c)}">${icon("settings", 13)}</button><button data-action="delete-category" data-value="${esc(c)}" aria-label="Delete ${esc(c)}">${icon("x", 13)}</button></span>`).join("")}</div>${button(`${icon("plus", 15)} Add category`, "new-category")}</section><section class="panel"><div class="panel-head"><div><h2>Your data</h2><p>Keep an independent backup outside the app</p></div></div><p class="muted">${mode === "cloud" ? "Cloud sync is not a disaster-recovery backup. Download JSON regularly. This browser also keeps an offline cache that may be readable to someone using this profile." : "Data is saved locally with IndexedDB. It does not sync across devices, and clearing browser storage can erase it."}</p><div class="button-group">${button(`${icon("download", 16)} Download JSON backup`, "backup", "primary")}${button(`${icon("upload", 16)} Restore backup`, "restore")}</div><div class="divider"></div>${button(mode === "cloud" ? "Clear this account's budget" : "Delete all local data", "clear-data", "danger")}</section><section class="panel"><div class="panel-head"><div><h2>Keyboard shortcuts</h2><p>Move faster through your finances</p></div></div><div class="shortcut-list"><div><span>Quick add</span><kbd>Ctrl J</kbd></div><div><span>Search ledger</span><kbd>Ctrl K</kbd></div><div><span>Undo</span><kbd>Ctrl Z</kbd></div><div><span>Navigate cells</span><kbd>Tab</kbd></div></div></section></div>`;
+}
+
+function paydaySettingsPanel() {
+  const p = paydayConfig();
+  return `<section class="panel payday-settings"><div class="panel-head"><div><h2>Weekly payday check-in</h2><p>In-app reminders follow your chosen local time.</p></div>${button("Open check-in", "open-payday")}</div><form id="payday-settings-form" class="form-stack"><div class="form-row"><label>Payday<select name="weekday">${["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((day, i) => option(String(i), day, String(p.weekday))).join("")}</select></label><label>Local time<input name="time" type="time" value="${esc(p.time)}" required></label></div><label>Time zone<input name="timeZone" value="${esc(p.timeZone)}" required list="payday-time-zones"><datalist id="payday-time-zones"><option value="America/New_York"><option value="America/Chicago"><option value="America/Denver"><option value="America/Los_Angeles"><option value="UTC"></datalist></label><label class="checkbox-row"><input name="autoPrompt" type="checkbox" ${p.autoPrompt ? "checked" : ""}> Show automatic check-ins</label><button class="btn btn-primary" type="submit">Save payday schedule</button></form><div class="divider"></div><h3 class="subheading">Paycheck allocation rules</h3><p class="muted">Rules create recommendations after bill reserves. Existing custom weekly allocations stay intact.</p>${p.rules.length ? `<div class="payday-rule-list">${p.rules.map((r) => `<div><strong>${esc(r.category)}</strong><span>${r.mode === "fixed" ? fmt(r.value) : `${r.value}%`} · priority ${r.priority}</span><button class="row-action" data-action="remove-payday-rule" data-value="${esc(r.category)}" aria-label="Remove ${esc(r.category)} rule">${icon("x", 15)}</button></div>`).join("")}</div>` : '<p class="muted">No automatic allocation rules yet.</p>'}<form id="payday-rule-form" class="form-stack"><div class="form-row"><label>Category<select name="category">${catOptions("Groceries")}</select></label><label>Allocation<select name="mode">${option("fixed", "Fixed amount", "fixed")}${option("percent", "Percent after bills", "fixed")}</select></label></div><div class="form-row"><label>Amount or percent<input name="value" inputmode="decimal" placeholder="0.00 or 15" required></label><label>Priority<select name="priority">${[1, 2, 3, 4, 5].map((n) => option(String(n), String(n), "3")).join("")}</select></label></div><button class="btn btn-secondary" type="submit">Save allocation rule</button></form></section>`;
 }
 
 function renderModal() {
   const close = `<button class="icon-button modal-close" data-action="close-modal" aria-label="Close dialog">${icon("x")}</button>`;
-  return `<div class="modal-backdrop" data-action="close-modal"><div class="modal" role="dialog" aria-modal="true" aria-label="${esc(modal.title)}"><div class="modal-header"><div><div class="eyebrow">NORTHSTAR</div><h2>${esc(modal.title)}</h2></div>${close}</div>${modalContent()}</div></div>`;
+  return `<div class="modal-backdrop" data-action="close-modal"><div class="modal ${modal.kind.startsWith("payday") ? "payday-modal" : ""}" role="dialog" aria-modal="true" aria-label="${esc(modal.title)}"><div class="modal-header"><div><div class="eyebrow">NORTHSTAR · PAYDAY</div><h2>${esc(modal.title)}</h2></div>${close}</div>${modalContent()}</div></div>`;
 }
 function modalContent() {
   const d = modal.data || {};
   switch (modal.kind) {
+    case "payday": {
+      const cycle = modal.data.cycle;
+      const existing = state.transactions.find((t) => t.paydayCycle === cycle && t.type === "Income" && t.status === "Received");
+      const missed = missedPaydays(new Date(), paydayConfig(), state.transactions, paydayConfig().checkins, 16, addDays(state.createdAt, -7));
+      return `<p class="payday-intro">Let's update your budget for the week. Enter the amount you actually received.</p><form id="payday-form" class="form-stack"><label>Payday date<input name="date" type="date" value="${esc(existing?.date || cycle)}" required></label><label>Actual take-home pay<input class="payday-amount" name="amount" inputmode="decimal" placeholder="0.00" value="${existing ? (existing.amountCents / 100).toFixed(2) : ""}" required autofocus></label><label>Optional notes<input name="notes" maxlength="5000" value="${esc(existing?.notes || "")}" placeholder="Hours worked, overtime, or anything useful"></label><div class="payday-live-preview">${existing ? paydayPlanHtml(paydayPreview(cycle, existing.amountCents), existing.amountCents) : '<strong>Instant plan preview</strong><p>Bill reserves and category guidance will update after you enter your pay.</p>'}</div>${missed.length ? `<p class="muted">Missed paydays available to backfill: ${missed.slice(0, 5).map(shortDate).join(", ")}. Choose one in the date field.</p>` : ""}<p class="muted payday-sync-state">${syncStatus === "Synced" ? "Ready to save" : syncStatus === "Offline" ? "Offline · will sync when connected" : esc(syncStatus)}</p><div class="modal-actions">${existing ? button("Cancel", "close-modal") : `${button("Remind me later", "payday-snooze")}${button("Skip this week", "payday-skip")}`}<button type="submit" class="btn btn-primary">${existing ? "Update paycheck" : "Save & Update Budget"}</button></div></form>`;
+    }
+    case "payday-summary": {
+      const { cycle, amountCents } = modal.data;
+      const plan = paydayPreview(cycle, amountCents);
+      const history = paycheckHistory(state.transactions, cycle).rows;
+      const change = history.find((row) => row.paydayCycle === cycle)?.changeCents;
+      return `<p class="payday-intro">Your weekly budget is ready. You received <strong>${fmt(amountCents)}</strong> on ${shortDate(cycle)}.${change == null ? "" : ` That's ${change >= 0 ? fmt(change) + " more" : fmt(-change) + " less"} than your previous paycheck.`}</p>${paydayPlanHtml(plan, amountCents)}<p class="muted payday-sync-state">${mode !== "cloud" ? "Saved on this browser only" : syncStatus === "Synced" ? "Saved to cloud" : syncStatus === "Offline" ? "Pending sync · offline" : "Saving to cloud…"}</p><div class="modal-actions">${button("Done", "close-modal")}${button("View My Weekly Budget", "view-payday-week", "primary")}</div>`;
+    }
     case "transaction":
       return `<form id="transaction-form" class="form-stack"><div class="form-row"><label>Date<input type="date" name="date" value="${esc(d.date || today())}" required></label><label>Type<select name="type" id="modal-tx-type">${typeOptions(d.type || "Expense")}</select></label></div><label>Description<input name="description" value="${esc(d.description || "")}" placeholder="What was it for?" required autofocus></label><div class="form-row"><label>Amount<input name="amount" inputmode="decimal" value="${d.amountCents != null ? (d.amountCents / 100).toFixed(2) : ""}" placeholder="0.00" required></label><label>Category<select name="category">${catOptions(d.category || "Other")}</select></label></div><div class="form-row"><label>Status<select name="status" id="modal-tx-status">${statusOptions(
         d.type || "Expense",
@@ -782,7 +840,7 @@ function modalContent() {
           "",
         )}</select></label><label>Notes<input name="notes" value="${esc(d.notes || "")}" placeholder="Optional"></label></div><div class="modal-actions">${button("Cancel", "close-modal")}<button type="submit" class="btn btn-primary">${d.id ? "Save changes" : "Add transaction"}</button></div></form>`;
     case "bill":
-      return `<form id="bill-form" class="form-stack"><label>Bill name<input name="name" value="${esc(d.name || "")}" required placeholder="e.g. Internet"></label><div class="form-row"><label>Amount<input name="amount" inputmode="decimal" value="${d.amountCents != null ? (d.amountCents / 100).toFixed(2) : ""}" required placeholder="0.00"></label><label>Category<select name="category">${catOptions(d.category || "Utilities")}</select></label></div><div class="form-row"><label>Frequency<select name="frequency">${FREQUENCIES.map((x) => option(x, x, d.frequency || "Monthly")).join("")}</select></label><label>Next due date<input type="date" name="nextDue" value="${esc(d.nextDue || today())}" required></label></div><label>Notes<input name="notes" value="${esc(d.notes || "")}" placeholder="Optional"></label><div class="modal-actions">${button("Cancel", "close-modal")}<button type="submit" class="btn btn-primary">Save bill</button></div></form>`;
+      return `<form id="bill-form" class="form-stack"><label>Bill name<input name="name" value="${esc(d.name || "")}" required placeholder="e.g. Internet"></label><div class="form-row"><label>Amount<input name="amount" inputmode="decimal" value="${d.amountCents != null ? (d.amountCents / 100).toFixed(2) : ""}" required placeholder="0.00"></label><label>Category<select name="category">${catOptions(d.category || "Utilities")}</select></label></div><div class="form-row"><label>Frequency<select name="frequency">${FREQUENCIES.map((x) => option(x, x, d.frequency || "Monthly")).join("")}</select></label><label>Next due date<input type="date" name="nextDue" value="${esc(d.nextDue || today())}" required></label></div><label>Optional sinking fund: spread over paychecks<input name="sinkingPaychecks" type="number" min="1" max="52" value="${esc(d.sinkingPaychecks || 1)}"><small>1 means reserve the full bill when due. Larger numbers suggest smaller reserves ahead of time.</small></label><label>Notes<input name="notes" value="${esc(d.notes || "")}" placeholder="Optional"></label><div class="modal-actions">${button("Cancel", "close-modal")}<button type="submit" class="btn btn-primary">Save bill</button></div></form>`;
     case "pay":
       return `<form id="pay-form" class="form-stack"><p class="muted">Record the actual payment. This creates one expense transaction and moves the bill to its next due date.</p><div class="form-row"><label>Payment date<input type="date" name="date" value="${today()}" required></label><label>Actual amount<input name="amount" inputmode="decimal" value="${(d.amountCents / 100).toFixed(2)}" required></label></div><div class="modal-actions">${button("Cancel", "close-modal")}<button type="submit" class="btn btn-primary">Record payment</button></div></form>`;
     case "goal":
@@ -792,7 +850,7 @@ function modalContent() {
     case "allocation":
       return `<form id="allocation-form" class="form-stack"><label>Week beginning<input type="date" name="week" value="${selectedWeek}" required></label><div class="form-row"><label>Category<select name="category">${catOptions("Groceries")}</select></label><label>Planned amount<input name="amount" inputmode="decimal" placeholder="0.00" required></label></div><div class="modal-actions">${button("Cancel", "close-modal")}<button type="submit" class="btn btn-primary">Save allocation</button></div></form>`;
     case "expected-pay":
-      return `<form id="expected-pay-form" class="form-stack"><p class="muted">Set a pay forecast for the week of ${niceDate(selectedWeek)}. This is a plan, not received income.</p><label>Expected amount<input name="amount" inputmode="decimal" value="${((state.payPlans?.[selectedWeek] ?? estimatedPay()) / 100).toFixed(2)}" required></label><div class="modal-actions">${button("Cancel", "close-modal")}<button type="submit" class="btn btn-primary">Save expected pay</button></div></form>`;
+      return `<form id="expected-pay-form" class="form-stack"><p class="muted">Set a pay forecast for the week of ${niceDate(selectedWeek)}. This is a plan, not received income.</p><label>Expected amount<input name="amount" inputmode="decimal" value="${((state.payPlans?.[selectedWeek] ?? estimatedPay(selectedWeek)) / 100).toFixed(2)}" required></label><div class="modal-actions">${button("Cancel", "close-modal")}<button type="submit" class="btn btn-primary">Save expected pay</button></div></form>`;
     case "category":
       return `<form id="category-form" class="form-stack"><label>Category name<input name="name" value="${esc(d.name || "")}" required maxlength="40"></label><div class="modal-actions">${button("Cancel", "close-modal")}<button type="submit" class="btn btn-primary">Save category</button></div></form>`;
     case "confirm":
@@ -827,7 +885,17 @@ function openModal(kind, title, data = {}) {
     0,
   );
 }
+function openPayday(cycle = currentPaydayCycle(), automatic = false) {
+  modal = { kind: "payday", title: "Happy Payday! 💸", data: { cycle }, automatic };
+  render();
+  setTimeout(() => document.querySelector(".payday-amount")?.focus(), 0);
+}
 function closeModal() {
+  if (modal?.kind === "payday" && modal.automatic) {
+    remember();
+    paydayState().checkins[modal.data.cycle] = { status: "dismissed" };
+    void persist();
+  }
   modal = null;
   render();
 }
@@ -878,6 +946,9 @@ function formData(form) {
 async function applyCloudState(next) {
   state = validateBackup(structuredClone(next));
   state.payPlans ??= {};
+  if (modal?.kind === "payday" && modal.automatic &&
+      state.transactions.some((t) => t.paydayCycle === modal.data.cycle && t.type === "Income" && t.status === "Received"))
+    modal = null;
   writeThrough(state, currentUser.id);
   await saveState(state, currentUser.id);
   render();
@@ -1025,6 +1096,23 @@ function handleSubmit(e) {
   const d = formData(form);
   try {
     switch (form.id) {
+      case "payday-form": {
+        const p = paydayConfig();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(d.date) || cycleForDate(d.date, p.weekday) !== d.date)
+          throw Error("Choose a date that matches your configured payday.");
+        const cycle = d.date;
+        const amountCents = validAmount(d.amount);
+        remember();
+        paydayState();
+        const { updated } = recordPaycheck(state, cycle, amountCents, d.notes.trim());
+        if (modal.automatic && modal.data.cycle !== cycle)
+          paydayState().checkins[modal.data.cycle] = { status: "dismissed" };
+        selectedWeek = weekStart(cycle, state.settings.weekStarts);
+        modal = { kind: "payday-summary", title: "Your weekly budget is ready!", data: { cycle, amountCents } };
+        if (mode === "cloud") setSyncStatus(navigator.onLine ? "Saving" : "Offline");
+        changed(updated ? "Paycheck updated." : mode === "cloud" ? "Paycheck recorded. Sync is pending until confirmed." : "Paycheck recorded on this browser.");
+        break;
+      }
       case "transaction-form": {
         const amountCents = validAmount(d.amount),
           data = {
@@ -1044,6 +1132,7 @@ function handleSubmit(e) {
       }
       case "bill-form": {
         const amountCents = validAmount(d.amount),
+          sinkingPaychecks = Number(d.sinkingPaychecks),
           data = {
             name: d.name.trim(),
             amountCents,
@@ -1051,7 +1140,10 @@ function handleSubmit(e) {
             frequency: d.frequency,
             nextDue: d.nextDue,
             notes: d.notes.trim(),
+            sinkingPaychecks,
           };
+        if (!Number.isInteger(sinkingPaychecks) || sinkingPaychecks < 1 || sinkingPaychecks > 52)
+          throw Error("Sinking fund paychecks must be between 1 and 52.");
         if (!data.name) throw Error("Bill name is required.");
         remember();
         const i = state.bills.findIndex((b) => b.id === modal.data.id);
@@ -1172,6 +1264,9 @@ function handleSubmit(e) {
           state.bills.forEach((b) => {
             if (b.category === old) b.category = name;
           });
+          paydayConfig().rules.forEach((rule) => {
+            if (rule.category === old) rule.category = name;
+          });
           Object.values(state.allocations).forEach((a) => {
             if (old in a) {
               a[name] = a[old];
@@ -1195,6 +1290,31 @@ function handleSubmit(e) {
         };
         selectedWeek = weekStart(today(), state.settings.weekStarts);
         changed("Preferences saved.");
+        break;
+      }
+      case "payday-settings-form": {
+        const weekday = Number(d.weekday);
+        if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6 ||
+          !/^([01]\d|2[0-3]):[0-5]\d$/.test(d.time) || !validTimeZone(d.timeZone.trim()))
+          throw Error("Enter a valid payday, local time, and IANA time zone.");
+        remember();
+        Object.assign(paydayState(), { weekday, time: d.time, timeZone: d.timeZone.trim(), autoPrompt: d.autoPrompt === "on" });
+        changed("Payday schedule saved.");
+        break;
+      }
+      case "payday-rule-form": {
+        const p = paydayState();
+        const priority = Number(d.priority);
+        const value = d.mode === "fixed" ? validAmount(d.value, true) : Number(d.value);
+        if (d.mode === "percent" && (!/^\d+(\.\d{1,2})?$/.test(d.value) || value < 0 || value > 100))
+          throw Error("Percentage must be between 0 and 100 with at most two decimals.");
+        if (!state.categories.includes(d.category) || !["fixed", "percent"].includes(d.mode) ||
+          !Number.isInteger(priority) || priority < 1 || priority > 5)
+          throw Error("Choose a valid category, allocation type, and priority.");
+        remember();
+        p.rules = p.rules.filter((rule) => rule.category !== d.category);
+        p.rules.push({ category: d.category, mode: d.mode, value: d.mode === "percent" ? Math.round(value * 100) / 100 : value, priority });
+        changed("Payday allocation rule saved.");
         break;
       }
     }
@@ -1400,6 +1520,35 @@ function handleClick(e) {
       break;
     case "close-modal":
       closeModal();
+      break;
+    case "open-payday":
+      openPayday(v || currentPaydayCycle());
+      break;
+    case "payday-snooze":
+      if (modal?.kind === "payday") {
+        remember();
+        paydayState().checkins[modal.data.cycle] = { status: "snoozed", deferUntil: new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString() };
+        modal = null;
+        changed("We'll remind you in about four hours.");
+      }
+      break;
+    case "payday-skip":
+      if (modal?.kind === "payday") {
+        remember();
+        paydayState().checkins[modal.data.cycle] = { status: "skipped" };
+        modal = null;
+        changed("This payday was skipped. You can reopen it manually.");
+      }
+      break;
+    case "view-payday-week":
+      page = "weekly";
+      modal = null;
+      render();
+      break;
+    case "remove-payday-rule":
+      remember();
+      paydayState().rules = paydayState().rules.filter((rule) => rule.category !== v);
+      changed("Payday rule removed.");
       break;
     case "quick-add":
     case "new-transaction":
@@ -1616,7 +1765,8 @@ function handleClick(e) {
       const used =
         state.transactions.some((t) => t.category === v) ||
         state.bills.some((b) => b.category === v) ||
-        Object.values(state.allocations).some((a) => v in a);
+        Object.values(state.allocations).some((a) => v in a) ||
+        paydayConfig().rules.some((rule) => rule.category === v);
       if (used)
         return notify("This category is in use. Rename it instead.", true);
       confirmAction(
@@ -1719,6 +1869,15 @@ document.addEventListener("focusout", (e) => {
   if (e.target.matches(".cell-input")) handleCellChange(e.target);
 });
 document.addEventListener("input", (e) => {
+  if (e.target.closest("#payday-form") && ["amount", "date"].includes(e.target.name)) {
+    const form = e.target.closest("form");
+    const amountCents = cents(form.elements.amount.value);
+    const preview = form.querySelector(".payday-live-preview");
+    if (preview) preview.innerHTML = amountCents !== null && amountCents > 0 &&
+      cycleForDate(form.elements.date.value, paydayConfig().weekday) === form.elements.date.value
+      ? paydayPlanHtml(paydayPreview(form.elements.date.value, amountCents), amountCents)
+      : '<strong>Instant plan preview</strong><p>Enter a valid payday date and paycheck amount.</p>';
+  }
   if (e.target.id === "transaction-search") {
     search = e.target.value;
     const caret = e.target.selectionStart;
@@ -1855,3 +2014,5 @@ if (cloudEnabled) {
   mode = "guest";
   render();
 }
+setInterval(checkPaydayPrompt, 30000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) checkPaydayPrompt(); });

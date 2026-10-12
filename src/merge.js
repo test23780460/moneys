@@ -1,4 +1,5 @@
 import { freshState } from "./storage.js";
+import { defaultPayday } from "./payday.js";
 
 // PostgreSQL jsonb can reorder object keys; compare values rather than JSON text.
 export function same(a, b) {
@@ -97,6 +98,8 @@ export function hasFinancialData(state) {
       state.goals.length ||
       Object.keys(state.allocations || {}).length ||
       Object.keys(state.payPlans || {}).length ||
+      Object.keys(state.payday?.checkins || {}).length ||
+      (state.payday && !same(state.payday, defaults.payday)) ||
       !same(state.categories, defaults.categories) ||
       !same(state.settings, defaults.settings),
   );
@@ -138,6 +141,16 @@ export function mergeStates(base, local, remote, preference = null) {
       goals: mergeGoals(base.goals, local.goals, remote.goals, conflicts, preference),
       allocations,
       payPlans: mergeMap(base.payPlans || {}, local.payPlans || {}, remote.payPlans || {}, "pay plan", conflicts, preference),
+      payday: {
+        ...defaultPayday(),
+        ...mergeMap(
+          Object.fromEntries(Object.entries(base.payday || {}).filter(([key]) => key !== "checkins")),
+          Object.fromEntries(Object.entries(local.payday || {}).filter(([key]) => key !== "checkins")),
+          Object.fromEntries(Object.entries(remote.payday || {}).filter(([key]) => key !== "checkins")),
+          "payday setting", conflicts, preference,
+        ),
+        checkins: mergeMap(base.payday?.checkins || {}, local.payday?.checkins || {}, remote.payday?.checkins || {}, "payday check-in", conflicts, preference),
+      },
       categories: choose(base.categories, local.categories, remote.categories, "categories", conflicts, preference),
       settings,
       createdAt: choose(base.createdAt, local.createdAt, remote.createdAt, "creation date", conflicts, preference),
@@ -174,6 +187,13 @@ export function mergeImport(local, cloud) {
         merged.allocations[week][category] = amount;
     }
   }
-  if (!hasFinancialData(cloud)) merged.settings = structuredClone(local.settings);
+  merged.payday ||= structuredClone(local.payday || defaultPayday());
+  merged.payday.checkins ||= {};
+  for (const [date, entry] of Object.entries(local.payday?.checkins || {}))
+    if (!Object.hasOwn(merged.payday.checkins, date)) merged.payday.checkins[date] = structuredClone(entry);
+  if (!hasFinancialData(cloud)) {
+    merged.settings = structuredClone(local.settings);
+    if (local.payday) merged.payday = structuredClone(local.payday);
+  }
   return { state: merged, counts };
 }

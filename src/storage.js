@@ -1,4 +1,5 @@
 import { DEFAULT_CATEGORIES, today } from "./finance.js";
+import { defaultPayday, validTimeZone } from "./payday.js";
 const DB = "northstar-budget-v1";
 const KEY = "budget";
 const SNAPSHOT = "northstar-budget-write-through-v1";
@@ -12,6 +13,7 @@ export const freshState = () => ({
   goals: [],
   allocations: {},
   payPlans: {},
+  payday: defaultPayday(),
   categories: [...DEFAULT_CATEGORIES],
   settings: { currency: "USD", weekStarts: 1, startingBalanceCents: 0 },
   createdAt: today(),
@@ -104,6 +106,7 @@ export function validateBackup(raw) {
       !["Income", "Expense", "Transfer", "Savings"].includes(t.type) ||
       !Number.isSafeInteger(t.amountCents) ||
       t.amountCents < 0 ||
+      (t.paydayCycle && (!/^\d{4}-\d{2}-\d{2}$/.test(t.paydayCycle) || Number.isNaN(Date.parse(`${t.paydayCycle}T12:00:00Z`)))) ||
       (t.direction && !["in", "out"].includes(t.direction))
     )
       throw Error("Backup contains an invalid transaction.");
@@ -113,7 +116,8 @@ export function validateBackup(raw) {
       !b.id ||
       !b.nextDue ||
       !Number.isSafeInteger(b.amountCents) ||
-      b.amountCents < 0
+      b.amountCents < 0 ||
+      (b.sinkingPaychecks != null && (!Number.isInteger(b.sinkingPaychecks) || b.sinkingPaychecks < 1 || b.sinkingPaychecks > 52))
     )
       throw Error("Backup contains an invalid bill.");
   }
@@ -129,6 +133,29 @@ export function validateBackup(raw) {
   for (const amount of Object.values(raw.payPlans || {})) {
     if (!Number.isSafeInteger(amount) || amount < 0)
       throw Error("Backup contains an invalid pay plan.");
+  }
+  if (raw.payday) {
+    const p = raw.payday;
+    if (!Number.isInteger(p.weekday) || p.weekday < 0 || p.weekday > 6 ||
+      !/^([01]\d|2[0-3]):[0-5]\d$/.test(p.time) ||
+      typeof p.timeZone !== "string" || !validTimeZone(p.timeZone) ||
+      typeof p.autoPrompt !== "boolean" || !Array.isArray(p.rules) ||
+      !p.checkins || typeof p.checkins !== "object" || Array.isArray(p.checkins))
+      throw Error("Backup contains invalid payday settings.");
+    for (const r of p.rules) {
+      if (!raw.categories.includes(r.category) || !["fixed", "percent"].includes(r.mode) ||
+        !Number.isFinite(r.value) || r.value < 0 ||
+        (r.mode === "fixed" && !Number.isSafeInteger(r.value)) ||
+        (r.mode === "percent" && r.value > 100) ||
+        !Number.isInteger(r.priority) || r.priority < 1 || r.priority > 5)
+        throw Error("Backup contains an invalid payday allocation rule.");
+    }
+    for (const [date, entry] of Object.entries(p.checkins)) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+        !["completed", "skipped", "dismissed", "snoozed"].includes(entry?.status) ||
+        (entry.deferUntil && Number.isNaN(Date.parse(entry.deferUntil))))
+        throw Error("Backup contains invalid payday check-in history.");
+    }
   }
   return raw;
 }

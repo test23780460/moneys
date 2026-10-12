@@ -12,14 +12,14 @@ select set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000001
 select public.save_budget_document(0, jsonb_build_object(
   'version', 1,
   'transactions', jsonb_build_array(
-    jsonb_build_object('id','paycheck-1','date','2026-10-11','type','Income',
-      'status','Received','amountCents',250000,'category','Paycheck','description','Test paycheck'),
+    jsonb_build_object('id','payday:2026-10-14','date','2026-10-14','paydayCycle','2026-10-14','type','Income',
+      'status','Received','amountCents',250000,'category','Food','description','Test paycheck'),
     jsonb_build_object('id','expense-1','date','2026-10-11','type','Expense',
       'status','Paid','amountCents',1250,'category','Food','description','Test expense')
   ),
   'bills', jsonb_build_array(
     jsonb_build_object('id','bill-1','nextDue','2026-11-11','amountCents',9500,
-      'frequency','Monthly','category','Bills','name','Test bill')
+      'frequency','Monthly','category','Bills','name','Test bill','sinkingPaychecks',4)
   ),
   'goals', jsonb_build_array(
     jsonb_build_object('id','goal-1','targetCents',100000,'name','Test goal',
@@ -29,6 +29,11 @@ select public.save_budget_document(0, jsonb_build_object(
   'categories', jsonb_build_array('Food'),
   'allocations', jsonb_build_object(),
   'payPlans', jsonb_build_object(),
+  'payday', jsonb_build_object('weekday',3,'time','18:00','timeZone','America/New_York',
+    'autoPrompt',true,'rules',jsonb_build_array(jsonb_build_object(
+      'category','Food','mode','percent','value',12.5,'priority',1)),
+    'checkins',jsonb_build_object('2026-10-14',jsonb_build_object(
+      'status','completed','transactionId','payday:2026-10-14'))),
   'settings', jsonb_build_object('currency', 'USD', 'weekStarts', 1, 'startingBalanceCents', 0),
   'createdAt', '2026-10-11'
 ));

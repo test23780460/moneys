@@ -1395,6 +1395,65 @@ svg {
   font-size: 12px;
   margin: 0 0 8px;
 }
+.payday-modal {
+  width: min(100%, 590px);
+  border-color: #4a776b;
+  background: radial-gradient(circle at 90% 0%, #23443b 0%, #151c24 42%);
+  box-shadow: 0 35px 100px #000b, 0 0 0 1px #4fa98822 inset;
+}
+.payday-modal .modal-header h2 {
+  font-size: clamp(24px, 4vw, 31px);
+}
+.payday-intro {
+  color: #d7e9e2;
+  line-height: 1.6;
+  margin: -5px 0 20px;
+}
+.payday-amount {
+  font-size: 30px !important;
+  font-weight: 700;
+  letter-spacing: -.04em;
+  height: 58px;
+  color: #e8fff4;
+  border-color: #559879 !important;
+}
+.payday-live-preview {
+  border: 1px solid #35594c;
+  background: #11271f;
+  border-radius: 12px;
+  padding: 15px;
+}
+.payday-live-preview > p { margin: 6px 0 0; color: #a6b9ae; font-size: 12px; }
+.payday-breakdown { display: flex; height: 15px; overflow: hidden; border-radius: 999px; background: #24332f; margin: 16px 0 9px; }
+.payday-breakdown span { display: block; min-width: 0; transition: width .3s ease; }
+.payday-breakdown .bills { background: #e6af68; }
+.payday-breakdown .savings { background: #ab91e9; }
+.payday-breakdown .spending { background: #67d4a6; }
+.payday-legend { display: flex; gap: 16px; flex-wrap: wrap; color: #aabcb3; font-size: 11px; margin-bottom: 16px; }
+.payday-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.payday-legend .dot.violet { background: #ab91e9; }
+.payday-facts { display: grid; gap: 7px; margin: 13px 0; }
+.payday-facts > div, .payday-rule-preview > div { display: flex; justify-content: space-between; gap: 15px; padding: 7px 0; border-bottom: 1px solid #ffffff14; }
+.payday-facts span, .payday-rule-preview span { color: #aabbb4; }
+.payday-facts strong { white-space: nowrap; }
+.payday-rule-preview { font-size: 12px; margin: 12px 0; }
+.payday-rule-preview small { font-size: 10px; }
+.payday-panel { margin: 20px 0; border-color: #33584a; background: linear-gradient(125deg, #1a2c27, #171f27 60%); }
+.payday-panel .panel-head { align-items: center; }
+.payday-panel .eyebrow { color: #81d9ad; margin-bottom: 5px; }
+.payday-settings .checkbox-row { display: flex; align-items: center; gap: 10px; }
+.payday-settings .checkbox-row input { width: auto; }
+.payday-rule-list > div { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid #ffffff14; }
+.payday-rule-list > div span { color: #aabbb4; margin-left: auto; }
+.paycheck-history .mini-row { gap: 12px; }
+.paycheck-history .mini-row > span { min-width: 92px; text-align: right; }
+@media (max-width: 600px) {
+  .payday-modal { padding: 18px; }
+  .payday-modal .modal-actions { flex-wrap: wrap; }
+  .payday-modal .modal-actions .btn-primary { width: 100%; order: -1; }
+  .payday-facts > div { font-size: 12px; }
+  .paycheck-history .mini-row { flex-wrap: wrap; }
+}
 .modal-actions {
   display: flex;
   justify-content: flex-end;
