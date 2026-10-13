@@ -12,7 +12,6 @@ export const DEFAULT_CATEGORIES = [
   "Personal",
   "Savings Transfers",
   "Other",
-  "Gambling",
 ];
 export const FREQUENCIES = [
   "Weekly",

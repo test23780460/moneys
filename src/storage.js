@@ -165,6 +165,7 @@ export function validateBackup(raw) {
   if (raw.gambling) {
     const g = raw.gambling;
     if (!Array.isArray(g.entries) || !g.limit ||
+      (g.archivedEntries != null && (!Array.isArray(g.archivedEntries) || g.archivedEntries.length > 10000)) ||
       !["none", "week", "month"].includes(g.limit.period) ||
       !Number.isSafeInteger(g.limit.amountCents) || g.limit.amountCents < 0 ||
       (g.limit.period !== "none" && g.limit.amountCents === 0) ||
@@ -202,6 +203,15 @@ export function validateBackup(raw) {
           links.add(id);
         }
       }
+    }
+    const archivedIds = new Set();
+    for (const entry of g.archivedEntries || []) {
+      if (!entry || typeof entry.id !== "string" || !entry.id || archivedIds.has(entry.id) ||
+        typeof entry.name !== "string" || !entry.name.trim() ||
+        !Number.isSafeInteger(entry.stakeCents) || entry.stakeCents < 0 ||
+        !Number.isSafeInteger(entry.payoutCents) || entry.payoutCents < 0)
+        throw Error("Backup contains an invalid archived gambling entry.");
+      archivedIds.add(entry.id);
     }
   }
   return raw;

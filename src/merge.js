@@ -101,6 +101,7 @@ export function hasFinancialData(state) {
       Object.keys(state.payPlans || {}).length ||
       Object.keys(state.payday?.checkins || {}).length ||
       (state.gambling?.entries?.length || 0) ||
+      (state.gambling?.archivedEntries?.length || 0) ||
       (state.gambling && !same(state.gambling.limit, defaults.gambling.limit)) ||
       (state.payday && !same(state.payday, defaults.payday)) ||
       !same(state.categories, defaults.categories) ||
@@ -156,6 +157,7 @@ export function mergeStates(base, local, remote, preference = null) {
       },
       gambling: {
         entries: mergeRows(base.gambling?.entries || [], local.gambling?.entries || [], remote.gambling?.entries || [], "gambling entry", conflicts, preference),
+        archivedEntries: mergeRows(base.gambling?.archivedEntries || [], local.gambling?.archivedEntries || [], remote.gambling?.archivedEntries || [], "archived gambling entry", conflicts, preference),
         limit: mergeMap(base.gambling?.limit || defaultGambling().limit, local.gambling?.limit || defaultGambling().limit, remote.gambling?.limit || defaultGambling().limit, "gambling limit", conflicts, preference),
       },
       categories: choose(base.categories, local.categories, remote.categories, "categories", conflicts, preference),
@@ -196,9 +198,16 @@ export function mergeImport(local, cloud) {
   }
   merged.payday ||= structuredClone(local.payday || defaultPayday());
   merged.gambling ||= defaultGambling();
+  merged.gambling.archivedEntries ||= [];
+  const archivedIds = new Set(merged.gambling.archivedEntries.map((entry) => entry.id));
+  for (const entry of local.gambling?.archivedEntries || []) {
+    if (archivedIds.has(entry.id) || merged.gambling.entries.some((item) => item.id === entry.id)) continue;
+    merged.gambling.archivedEntries.push(structuredClone(entry));
+    archivedIds.add(entry.id);
+  }
   const gamblingIds = new Set(merged.gambling.entries.map((entry) => entry.id));
   for (const entry of local.gambling?.entries || []) {
-    if (gamblingIds.has(entry.id)) { counts.skipped++; continue; }
+    if (gamblingIds.has(entry.id) || archivedIds.has(entry.id)) { counts.skipped++; continue; }
     // An ID collision may belong to a different ledger row in the cloud.
     const links = [[entry.stakeTransactionId, "Expense", "Paid", entry.stakeCents],
       [entry.payoutTransactionId, "Income", "Received", entry.payoutCents]];

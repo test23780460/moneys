@@ -31,7 +31,7 @@ import {
 import { BudgetSync, cloud, cloudEnabled } from "./cloud.js";
 import { hasFinancialData } from "./merge.js";
 import { defaultPayday, latestDuePayday, cycleForDate, missedPaydays, paydayPlan, paycheckHistory, recordPaycheck, shouldPromptPayday, validTimeZone, zonedNow } from "./payday.js";
-import { defaultGambling, deleteGamblingEntry, gamblingCsv, gamblingGroups, gamblingLimit, gamblingNet, gamblingTotals, linkedEntryForTransaction, saveGamblingEntry } from "./gambling.js";
+import { archiveLinkedGamblingEntry } from "./gambling.js";
 
 const root = document.querySelector("#app");
 let state = freshState();
@@ -48,7 +48,6 @@ let search = "",
 let selectedWeek = weekStart(today()),
   selectedMonth = monthStart(today()),
   selectedDate = today();
-let gamblingTab = "scratch", gamblingSearch = "", gamblingSort = "date", gamblingSortDir = -1;
 let modal = null,
   toastTimer,
   pendingSave = Promise.resolve(),
@@ -81,7 +80,6 @@ const nav = [
   ["monthly", "Monthly Budget", "calendar"],
   ["bills", "Bills", "receipt"],
   ["goals", "Savings Goals", "target"],
-  ["gambling", "Gambling Tracker", "chart"],
   ["analytics", "Analytics", "chart"],
   ["settings", "Settings", "settings"],
 ];
@@ -303,7 +301,7 @@ function render() {
     return;
   }
   const active = nav.find((x) => x[0] === page) || nav[0];
-  root.innerHTML = `<div class="shell"><aside class="sidebar ${mobileNav ? "open" : ""}"><div class="brand"><span class="brand-mark">N</span><span>northstar<span class="brand-dot">.</span><small>PERSONAL FINANCE</small></span></div><div class="workspace-label">WORKSPACE</div><nav aria-label="Main navigation">${nav.map(([id, label, ico]) => `<button type="button" class="nav-item ${page === id ? "active" : ""}" data-page="${id}">${icon(ico)}<span>${label}</span>${page === id ? '<span class="nav-indicator"></span>' : ""}</button>`).join("")}</nav><div class="sidebar-bottom"><div class="privacy-note">${icon("wallet", 18)}<span>${mode === "cloud" ? "Cloud sync with<br>local offline cache." : "Your data stays in<br>this browser."}</span></div><div class="sidebar-footer">NORTHSTAR <span>v2.2</span></div></div></aside>${mobileNav ? '<button class="mobile-scrim" data-action="toggle-nav" aria-label="Close menu"></button>' : ""}<div class="main-wrap"><header class="topbar"><div class="top-left"><button class="mobile-menu icon-button" data-action="toggle-nav" aria-label="Open menu">${icon("menu")}</button><span class="breadcrumb">Workspace</span>${icon("chevron", 14)}<strong>${active[1]}</strong></div><div class="top-actions"><span class="sync-status" title="${esc(syncError)}">${esc(syncStatus)}</span>${button(`${icon("spark", 15)}<span>Payday check-in</span>`, "open-payday", "secondary", 'aria-label="Open payday check-in"') }<button class="global-search" data-action="global-search">${icon("search", 16)}<span>Search transactions</span><kbd>Ctrl K</kbd></button><span class="top-divider"></span>${button(`${icon("plus", 16)}<span>Quick add</span>`, "quick-add", "primary")}</div></header><main class="main-content">${renderPage()}</main></div></div>${modal ? renderModal() : ""}`;
+  root.innerHTML = `<div class="shell"><aside class="sidebar ${mobileNav ? "open" : ""}"><div class="brand"><span class="brand-mark">N</span><span>northstar<span class="brand-dot">.</span><small>PERSONAL FINANCE</small></span></div><div class="workspace-label">WORKSPACE</div><nav aria-label="Main navigation">${nav.map(([id, label, ico]) => `<button type="button" class="nav-item ${page === id ? "active" : ""}" data-page="${id}">${icon(ico)}<span>${label}</span>${page === id ? '<span class="nav-indicator"></span>' : ""}</button>`).join("")}</nav><div class="sidebar-bottom"><div class="privacy-note">${icon("wallet", 18)}<span>${mode === "cloud" ? "Cloud sync with<br>local offline cache." : "Your data stays in<br>this browser."}</span></div><div class="sidebar-footer">NORTHSTAR <span>v2.3</span></div></div></aside>${mobileNav ? '<button class="mobile-scrim" data-action="toggle-nav" aria-label="Close menu"></button>' : ""}<div class="main-wrap"><header class="topbar"><div class="top-left"><button class="mobile-menu icon-button" data-action="toggle-nav" aria-label="Open menu">${icon("menu")}</button><span class="breadcrumb">Workspace</span>${icon("chevron", 14)}<strong>${active[1]}</strong></div><div class="top-actions"><span class="sync-status" title="${esc(syncError)}">${esc(syncStatus)}</span>${button(`${icon("spark", 15)}<span>Payday check-in</span>`, "open-payday", "secondary", 'aria-label="Open payday check-in"') }<button class="global-search" data-action="global-search">${icon("search", 16)}<span>Search transactions</span><kbd>Ctrl K</kbd></button><span class="top-divider"></span>${button(`${icon("plus", 16)}<span>Quick add</span>`, "quick-add", "primary")}</div></header><main class="main-content">${renderPage()}</main></div></div>${modal ? renderModal() : ""}`;
 }
 function authPage() {
   const heading = recovery
@@ -347,8 +345,6 @@ function renderPage() {
       return goalsPage();
     case "analytics":
       return analyticsPage();
-    case "gambling":
-      return gamblingPage();
     case "settings":
       return settingsPage();
     default:
@@ -802,54 +798,6 @@ function analyticsPage() {
   }</section>`;
 }
 
-function gamblingConfig() {
-  return state.gambling || defaultGambling();
-}
-function gamblingLabel(kind) {
-  return { scratch: "Scratch-offs", game: "Games", other: "Other gambling" }[kind] || "Other gambling";
-}
-function gamblingEntryLabel(kind) {
-  return { scratch: "scratch-off", game: "game", other: "other gambling" }[kind] || "activity";
-}
-function netHtml(amount) {
-  return `<strong class="${amount < 0 ? "negative" : amount > 0 ? "positive" : "muted"}">${amount > 0 ? "+" : amount < 0 ? "−" : ""}${fmt(Math.abs(amount))}</strong>`;
-}
-function visibleGamblingEntries() {
-  const rows = gamblingConfig().entries.filter((e) => inRange(e.date, currentRange()) && e.kind === gamblingTab &&
-    `${e.name} ${e.subcategory || ""} ${e.platform} ${e.notes}`.toLowerCase().includes(gamblingSearch.toLowerCase()));
-  rows.sort((a, b) => {
-    const av = gamblingSort === "net" ? gamblingNet(a) : gamblingSort === "stake" ? a.stakeCents : gamblingSort === "payout" ? a.payoutCents : String(a[gamblingSort] || "");
-    const bv = gamblingSort === "net" ? gamblingNet(b) : gamblingSort === "stake" ? b.stakeCents : gamblingSort === "payout" ? b.payoutCents : String(b[gamblingSort] || "");
-    return (typeof av === "number" ? av - bv : av.localeCompare(bv)) * gamblingSortDir;
-  });
-  return rows;
-}
-function gamblingPage() {
-  const periodRows = gamblingConfig().entries.filter((e) => inRange(e.date, currentRange()));
-  const rows = visibleGamblingEntries();
-  const totals = gamblingTotals(periodRows), tabTotals = gamblingTotals(periodRows.filter((e) => e.kind === gamblingTab));
-  const limit = gamblingLimit(gamblingConfig(), today(), state.settings.weekStarts);
-  const weeks = gamblingGroups(periodRows, "week", state.settings.weekStarts).slice(0, 6);
-  const months = gamblingGroups(periodRows, "month").slice(0, 6);
-  const gameGroups = gamblingGroupsByName(periodRows.filter((e) => e.kind === gamblingTab));
-  return `${titleRow("SPENDING CONTROL", "Gambling Tracker", "Track actual wagers and received gross payouts. No deposits, expected prizes, or transfers count as results.", button(`${icon("plus", 16)} Add ${gamblingEntryLabel(gamblingTab)} entry`, "new-gambling", "primary"))}${tabPeriod()}<div class="stats-grid gambling-stats">${card("Money spent", fmt(totals.spentCents), "wallet", "rose")}${card("Money returned", fmt(totals.returnedCents), "arrow", "green")}${card("Net profit / loss", netHtml(totals.netCents), "chart", totals.netCents < 0 ? "rose" : "green")}${card("Activities", String(totals.count), "table", "blue")}${card("Biggest win", fmt(totals.biggestWinCents), "arrow", "green")}${card("Total losses", fmt(totals.lossesCents), "wallet", "rose")}</div><div class="gambling-info"><strong>Payout means the gross amount actually returned, including any original stake.</strong> Net = payouts − wagers. A deposit to a gambling account is a transfer, not a wager.</div><div class="two-col gambling-top"><section class="panel"><div class="panel-head"><div><h2>Spending limit</h2><p>Expense control; payouts never raise this allowance</p></div></div><form id="gambling-limit-form" class="form-stack"><div class="form-row"><label>Limit period<select name="period">${option("none", "Off", gamblingConfig().limit.period)}${option("week", "Weekly", gamblingConfig().limit.period)}${option("month", "Monthly", gamblingConfig().limit.period)}</select></label><label>Planned maximum<input name="amount" inputmode="decimal" value="${(gamblingConfig().limit.amountCents / 100).toFixed(2)}" required></label></div><button type="submit" class="btn btn-secondary">Save limit</button></form>${limit ? `<div class="gambling-limit"><div class="gambling-limit-heading"><span>${shortDate(limit.from)} – ${shortDate(limit.to)}</span><strong>${fmt(limit.spentCents)} / ${fmt(limit.amountCents)}</strong></div><div class="bar-track"><div style="width:${Math.min(100, limit.percent)}%;background:${limit.percent >= 100 ? "var(--rose)" : limit.percent >= 80 ? "var(--amber)" : "var(--green)"}"></div></div><p class="${limit.percent >= 100 ? "negative" : limit.percent >= 80 ? "limit-warning" : "muted"}">${limit.percent >= 100 ? "Limit reached or exceeded." : limit.percent >= 80 ? "Approaching your spending limit." : `${fmt(limit.remainingCents)} remaining in your plan.`}</p></div>` : '<p class="muted compact">Set a weekly or monthly maximum to monitor wager spending.</p>'}</section><section class="panel"><div class="panel-head"><div><h2>Results over time</h2><p>Within the selected date range</p></div></div><div class="gambling-trends"><div><h3>Weekly</h3>${gamblingTrendRows(weeks)}</div><div><h3>Monthly</h3>${gamblingTrendRows(months)}</div></div></section></div><div class="gambling-tabs" role="tablist" aria-label="Gambling activity type">${["scratch", "game", "other"].map((kind) => `<button type="button" role="tab" aria-selected="${kind === gamblingTab}" class="${kind === gamblingTab ? "active" : ""}" data-action="gambling-tab" data-value="${kind}">${gamblingLabel(kind)}</button>`).join("")}</div><section class="panel gambling-section"><div class="panel-head"><div><h2>${gamblingLabel(gamblingTab)}</h2><p>${tabTotals.count} ${tabTotals.count === 1 ? "record" : "records"} · ${fmt(tabTotals.spentCents)} spent · ${fmt(tabTotals.returnedCents)} returned · net ${fmt(tabTotals.netCents)}</p></div>${button("Add entry", "new-gambling", "primary")}</div>${gameGroups.length ? `<div class="gambling-aggregates">${gameGroups.slice(0, 6).map((g) => `<div><span>${esc(g.name)} <small>(${g.count})</small></span>${netHtml(g.netCents)}</div>`).join("")}</div>` : ""}<div class="toolbar"><label class="search-field">${icon("search", 17)}<input id="gambling-search" type="search" placeholder="Search ${gamblingLabel(gamblingTab).toLowerCase()}…" value="${esc(gamblingSearch)}" aria-label="Search gambling history"></label>${button(`${icon("download", 16)} Export CSV`, "export-gambling")}</div><div class="table-panel"><div class="table-scroll"><table class="ledger gambling-ledger"><thead><tr>${[["date","Date"],["kind","Type"],["name","Name"],["stake","Money spent"],["payout","Money returned"],["net","Net profit / loss"],["notes","Notes"]].map(([key,label]) => `<th><button type="button" data-action="gambling-sort" data-value="${key}">${label}${gamblingSort === key ? gamblingSortDir === -1 ? " ↓" : " ↑" : ""}</button></th>`).join("")}<th>Actions</th></tr></thead><tbody>${rows.map((e) => `<tr><td>${shortDate(e.date)}${e.time ? `<small>${esc(e.time)}</small>` : ""}</td><td>${gamblingLabel(e.kind)}</td><td><strong>${esc(e.name)}</strong>${e.subcategory ? `<small>${esc(e.subcategory)}</small>` : ""}${e.kind === "scratch" ? `<small>${e.ticketCount} × ${fmt(e.ticketPriceCents)}</small>` : ""}${e.rounds ? `<small>${e.rounds} rounds</small>` : ""}${e.platform ? `<small>${esc(e.platform)}</small>` : ""}</td><td class="negative">${fmt(e.stakeCents)}</td><td class="positive">${fmt(e.payoutCents)}</td><td>${netHtml(gamblingNet(e))}</td><td title="${esc(e.notes)}">${esc(e.notes || "—")}</td><td class="gambling-actions">${button("Edit", "edit-gambling", "secondary", `data-id="${esc(e.id)}"`)}${button("Delete", "delete-gambling", "danger", `data-id="${esc(e.id)}"`)}</td></tr>`).join("")}</tbody></table>${rows.length ? "" : empty("No matching records", "Add an entry or change the selected date range and search.", "new-gambling", "Add entry")}</div></div><p class="table-help">Edit entries here to update linked ledger amounts. Existing ledger transactions you link stay intact if you delete a tracker entry.</p></section>`;
-}
-function gamblingGroupsByName(entries) {
-  const grouped = new Map();
-  for (const e of entries) {
-    const key = e.name.trim().toLowerCase();
-    const group = grouped.get(key) || { name: e.name, rows: [] };
-    group.rows.push(e); grouped.set(key, group);
-  }
-  return [...grouped.values()].map((group) => ({ name: group.name, ...gamblingTotals(group.rows) }))
-    .sort((a, b) => b.spentCents - a.spentCents);
-}
-function gamblingTrendRows(groups) {
-  if (!groups.length) return '<p class="muted compact">No records in this date range.</p>';
-  const scale = Math.max(1, ...groups.map((g) => Math.abs(g.netCents)));
-  return groups.map((g) => `<div class="gambling-trend-row"><span>${shortDate(g.date)}</span><div class="gambling-trend-bar" aria-label="Net result ${fmt(g.netCents)}"><i class="${g.netCents < 0 ? "loss" : "gain"}" style="width:${Math.max(g.netCents ? 5 : 0, Math.round(Math.abs(g.netCents) / scale * 100))}%"></i></div><span>${fmt(g.spentCents)} spent</span>${netHtml(g.netCents)}</div>`).join("");
-}
-
 function settingsPage() {
   const cloudAccount = mode === "cloud"
     ? `<section class="panel"><div class="panel-head"><div><h2>Your account</h2><p>${esc(currentUser?.email || "")}</p></div></div><form id="account-form" class="form-stack"><label>Display name<input name="displayName" maxlength="80" value="${esc(currentUser?.user_metadata?.display_name || "")}"></label><label>Email<input name="email" type="email" value="${esc(currentUser?.email || "")}" required></label><button class="btn btn-primary" type="submit">Save account</button></form><div class="button-group">${button("Change password", "change-password")}${button("Sign out", "signout")}</div><div class="divider"></div>${button("Permanently delete account", "delete-account", "danger")}</section><section class="panel"><div class="panel-head"><div><h2>Cloud synchronization</h2><p>Your signed-in budget is stored in Supabase PostgreSQL.</p></div></div><p class="muted">Status: <strong>${esc(syncStatus)}</strong>${syncError ? ` · ${esc(syncError)}` : ""}</p><p class="muted">Last confirmed: ${sync?.lastSynced ? esc(new Date(sync.lastSynced).toLocaleString()) : "Not yet"}</p><p class="muted">Offline edits stay on this device and retry automatically. A cloud conflict needs your choice before saving.</p>${sync?.conflict ? button("Review conflict", "review-conflict", "primary") : button("Retry sync", "retry-sync")}${guestState && hasFinancialData(guestState) ? `<div class="divider"></div>${button("Review local data import", "review-migration")}` : ""}</section>`
@@ -864,13 +812,11 @@ function paydaySettingsPanel() {
 
 function renderModal() {
   const close = `<button class="icon-button modal-close" data-action="close-modal" aria-label="Close dialog">${icon("x")}</button>`;
-  return `<div class="modal-backdrop" data-action="close-modal"><div class="modal ${modal.kind.startsWith("payday") ? "payday-modal" : modal.kind === "gambling" ? "gambling-modal" : ""}" role="dialog" aria-modal="true" aria-label="${esc(modal.title)}"><div class="modal-header"><div><div class="eyebrow">NORTHSTAR · ${modal.kind.startsWith("payday") ? "PAYDAY" : modal.kind === "gambling" ? "GAMBLING TRACKER" : "WORKSPACE"}</div><h2>${esc(modal.title)}</h2></div>${close}</div>${modalContent()}</div></div>`;
+  return `<div class="modal-backdrop" data-action="close-modal"><div class="modal ${modal.kind.startsWith("payday") ? "payday-modal" : ""}" role="dialog" aria-modal="true" aria-label="${esc(modal.title)}"><div class="modal-header"><div><div class="eyebrow">NORTHSTAR · ${modal.kind.startsWith("payday") ? "PAYDAY" : "WORKSPACE"}</div><h2>${esc(modal.title)}</h2></div>${close}</div>${modalContent()}</div></div>`;
 }
 function modalContent() {
   const d = modal.data || {};
   switch (modal.kind) {
-    case "gambling":
-      return gamblingFormHtml(modal.data);
     case "payday": {
       const cycle = modal.data.cycle;
       const existing = state.transactions.find((t) => t.paydayCycle === cycle && t.type === "Income" && t.status === "Received");
@@ -931,21 +877,6 @@ function modalContent() {
   }
 }
 
-function gamblingLinkOptions(type, currentId, entryId) {
-  const managedId = `gambling:${entryId}:${type === "Expense" ? "stake" : "payout"}`;
-  const selected = currentId === managedId ? "create" : currentId || "create";
-  const rows = state.transactions.filter((tx) => tx.type === type && actual(tx) &&
-    !(type === "Income" && tx.paydayCycle) &&
-    (!linkedEntryForTransaction(gamblingConfig().entries.filter((e) => e.id !== entryId), tx.id)) &&
-    (!tx.gamblingEntryId || tx.gamblingEntryId === entryId));
-  return `${option("create", "Create a new ledger transaction", selected)}${rows.filter((tx) => tx.id !== managedId).map((tx) => option(tx.id, `${tx.date} · ${tx.description} · ${fmt(tx.amountCents)}`, selected)).join("")}`;
-}
-function gamblingFormHtml(entry = {}) {
-  const kind = entry.kind || gamblingTab;
-  const scratch = kind === "scratch", game = kind === "game";
-  return `<p class="muted">Record actual money spent and gross payouts received. Linking an existing confirmed ledger row prevents double-counting.</p><form id="gambling-form" class="form-stack"><div class="form-row"><label>Date<input name="date" type="date" value="${esc(entry.date || today())}" required></label>${game ? `<label>Time<input name="time" type="time" value="${esc(entry.time || "")}" required></label>` : `<label>${scratch ? "Ticket or game name" : "Activity type"}<input name="name" maxlength="500" value="${esc(entry.name || "")}" required autofocus></label>`}</div>${game ? `<label>Game name<input name="name" maxlength="500" value="${esc(entry.name || "")}" required autofocus></label>` : ""}<div class="form-row">${scratch ? `<label>Ticket price<input name="ticketPrice" inputmode="decimal" value="${entry.ticketPriceCents != null ? (entry.ticketPriceCents / 100).toFixed(2) : ""}" required></label><label>Number of tickets<input name="ticketCount" type="number" min="1" max="10000" step="1" value="${entry.ticketCount || 1}" required></label>` : `<label>Amount wagered / entry fee<input name="stake" inputmode="decimal" value="${entry.stakeCents != null ? (entry.stakeCents / 100).toFixed(2) : ""}" required></label><label>${game ? "Number of rounds (optional)" : "Platform or location (optional)"}<input name="${game ? "rounds" : "platform"}" ${game ? 'type="number" min="1" max="1000000" step="1"' : 'maxlength="500"'} value="${esc(game ? entry.rounds || "" : entry.platform || "")}"></label>`}</div>${scratch ? `<div class="gambling-calculated">Total purchase cost <strong id="scratch-total">${fmt(entry.stakeCents || 0)}</strong></div>` : ""}<div class="form-row"><label>Gross payout actually received<input name="payout" inputmode="decimal" value="${entry.payoutCents != null ? (entry.payoutCents / 100).toFixed(2) : "0.00"}" required></label><label>Subcategory (optional)<input name="subcategory" maxlength="80" value="${esc(entry.subcategory || "")}" placeholder="Lottery, poker, sportsbook…"></label></div>${game ? `<label>Platform or location (optional)<input name="platform" maxlength="500" value="${esc(entry.platform || "")}"></label>` : ""}<label>Payout received date<input name="payoutDate" type="date" value="${esc(entry.payoutDate || entry.date || today())}" required></label><label>Notes<textarea name="notes" maxlength="5000" rows="2" placeholder="Optional">${esc(entry.notes || "")}</textarea></label><div class="gambling-calculated">Net profit / loss <span id="gambling-net-preview">${netHtml(gamblingNet({ stakeCents: entry.stakeCents || 0, payoutCents: entry.payoutCents || 0 }))}</span></div><div class="gambling-link-panel"><h3>Connect to the main budget</h3><p>For amounts already in your spreadsheet, choose the matching transaction. The amount must match exactly.</p><label>Stake or ticket purchase<select name="stakeChoice">${gamblingLinkOptions("Expense", entry.stakeTransactionId, entry.id)}</select></label><label>Received payout<select name="payoutChoice">${gamblingLinkOptions("Income", entry.payoutTransactionId, entry.id)}</select></label></div><div class="modal-actions">${button("Cancel", "close-modal")}<button type="submit" class="btn btn-primary">${entry.id ? "Save changes" : "Record activity"}</button></div></form>`;
-}
-
 function openModal(kind, title, data = {}) {
   modal = { kind, title, data };
   render();
@@ -981,9 +912,8 @@ function addTransaction(data) {
 function editTransaction(id, data) {
   const i = state.transactions.findIndex((t) => t.id === id);
   if (i < 0) return;
-  if (linkedEntryForTransaction(gamblingConfig().entries, id))
-    throw Error("Edit this linked transaction from Gambling Tracker to keep its totals accurate.");
   remember();
+  archiveLinkedGamblingEntry(state, id);
   state.transactions[i] = { ...state.transactions[i], ...data };
   syncGoalMovement(state.transactions[i]);
   changed("Transaction updated.");
@@ -1168,48 +1098,6 @@ function handleSubmit(e) {
   const d = formData(form);
   try {
     switch (form.id) {
-      case "gambling-limit-form": {
-        const amountCents = validAmount(d.amount, true);
-        if (!["none", "week", "month"].includes(d.period)) throw Error("Choose a valid limit period.");
-        if (d.period !== "none" && amountCents === 0) throw Error("Enter a spending limit greater than zero.");
-        remember();
-        (state.gambling ||= defaultGambling()).limit = { period: d.period, amountCents };
-        changed("Gambling spending limit saved.");
-        break;
-      }
-      case "gambling-form": {
-        const kind = modal?.data?.kind || gamblingTab;
-        const name = d.name.trim();
-        if (!name) throw Error("Enter an activity name.");
-        const [year, month, day] = d.date.split("-").map(Number), parsed = dateObj(d.date);
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(d.date) || parsed.getFullYear() !== year || parsed.getMonth() + 1 !== month || parsed.getDate() !== day)
-          throw Error("Enter a valid activity date.");
-        const [payYear, payMonth, payDay] = d.payoutDate.split("-").map(Number), payParsed = dateObj(d.payoutDate);
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(d.payoutDate) || payParsed.getFullYear() !== payYear || payParsed.getMonth() + 1 !== payMonth || payParsed.getDate() !== payDay)
-          throw Error("Enter a valid payout received date.");
-        const ticketPriceCents = kind === "scratch" ? validAmount(d.ticketPrice, true) : null;
-        const ticketCount = kind === "scratch" ? Number(d.ticketCount) : null;
-        if (kind === "scratch" && (!Number.isInteger(ticketCount) || ticketCount < 1 || ticketCount > 10000))
-          throw Error("Enter between 1 and 10,000 tickets.");
-        const stakeCents = kind === "scratch" ? ticketPriceCents * ticketCount : validAmount(d.stake, true);
-        const payoutCents = validAmount(d.payout, true);
-        if (!Number.isSafeInteger(stakeCents) || (!stakeCents && !payoutCents))
-          throw Error("Enter money spent or a payout received.");
-        const rounds = d.rounds ? Number(d.rounds) : null;
-        if (rounds != null && (!Number.isInteger(rounds) || rounds < 1 || rounds > 1000000))
-          throw Error("Rounds must be a whole number from 1 to 1,000,000.");
-        if (kind === "game" && !/^([01]\d|2[0-3]):[0-5]\d$/.test(d.time))
-          throw Error("Enter a valid game time.");
-        const entry = { id: modal.data.id, kind, date: d.date, payoutDate: d.payoutDate, time: kind === "game" ? d.time : "",
-          name, subcategory: d.subcategory.trim(), platform: (d.platform || "").trim(),
-          ticketPriceCents, ticketCount, rounds, stakeCents, payoutCents, notes: d.notes.trim(),
-          stakeChoice: d.stakeChoice, payoutChoice: d.payoutChoice };
-        remember();
-        saveGamblingEntry(state, entry);
-        modal = null;
-        changed("Gambling activity saved and budget updated.");
-        break;
-      }
       case "payday-form": {
         const p = paydayConfig();
         if (!/^\d{4}-\d{2}-\d{2}$/.test(d.date) || cycleForDate(d.date, p.weekday) !== d.date)
@@ -1443,11 +1331,6 @@ function handleCellChange(el) {
     t = state.transactions.find((x) => x.id === row?.dataset.id),
     key = el.dataset.cell;
   if (!t || !key) return;
-  if (linkedEntryForTransaction(gamblingConfig().entries, t.id)) {
-    notify("Edit this linked transaction from Gambling Tracker.", true);
-    el.value = txValue(t, key);
-    return;
-  }
   let value = el.value;
   if (key === "amountCents") {
     const n = cents(value);
@@ -1473,6 +1356,7 @@ function handleCellChange(el) {
   }
   if (key === "type" && value !== t.type) {
     remember();
+    archiveLinkedGamblingEntry(state, t.id);
     if (t.goalId) {
       removeGoalMovement(t);
       delete t.goalId;
@@ -1486,6 +1370,7 @@ function handleCellChange(el) {
   }
   if (t[key] === value) return;
   remember();
+  archiveLinkedGamblingEntry(state, t.id);
   t[key] = value;
   syncGoalMovement(t);
   persist();
@@ -1524,8 +1409,6 @@ function pasteGrid(e) {
   for (let i = 0; i < grid.length; i++) {
     const t = list[startIndex + i];
     if (!t) break;
-    if (linkedEntryForTransaction(gamblingConfig().entries, t.id))
-      return notify("Paste rejected: edit linked gambling transactions in Gambling Tracker.", true);
     const patch = {};
     for (let j = 0; j < grid[i].length; j++) {
       const key = columns[colIndex + j]?.[0];
@@ -1555,6 +1438,7 @@ function pasteGrid(e) {
   }
   remember();
   for (const [t, patch] of updates) {
+    archiveLinkedGamblingEntry(state, t.id);
     Object.assign(t, patch);
     if (patch.type && !patch.status) t.status = statusOptions(t.type)[0];
   }
@@ -1577,34 +1461,6 @@ function handleClick(e) {
     id = el.dataset.id,
     v = el.dataset.value;
   switch (a) {
-    case "gambling-tab":
-      gamblingTab = v;
-      gamblingSearch = "";
-      render();
-      break;
-    case "new-gambling":
-      openModal("gambling", `Record ${gamblingEntryLabel(gamblingTab)}`, { kind: gamblingTab });
-      break;
-    case "edit-gambling": {
-      const entry = gamblingConfig().entries.find((row) => row.id === id);
-      if (entry) openModal("gambling", `Edit ${gamblingEntryLabel(entry.kind)}`, entry);
-      break;
-    }
-    case "delete-gambling":
-      confirmAction("Delete gambling activity", "The tracker entry and any ledger transactions created by it will be removed. Pre-existing linked transactions will remain.", () => {
-        remember();
-        deleteGamblingEntry(state, id);
-        changed("Gambling activity deleted.");
-      });
-      break;
-    case "export-gambling":
-      download(`northstar-gambling-${gamblingTab}-${today()}.csv`, gamblingCsv(visibleGamblingEntries()), "text/csv");
-      break;
-    case "gambling-sort":
-      if (gamblingSort === v) gamblingSortDir *= -1;
-      else { gamblingSort = v; gamblingSortDir = v === "date" ? -1 : 1; }
-      render();
-      break;
     case "show-signin":
     case "show-register":
     case "show-reset":
@@ -1720,10 +1576,6 @@ function handleClick(e) {
     case "duplicate-row": {
       const t = state.transactions.find((x) => x.id === id);
       if (t) {
-        if (linkedEntryForTransaction(gamblingConfig().entries, id)) {
-          notify("Add a new Gambling Tracker entry for another activity.", true);
-          break;
-        }
         remember();
         const copy = {
           ...structuredClone(t),
@@ -1740,10 +1592,6 @@ function handleClick(e) {
       break;
     }
     case "delete-row":
-      if (linkedEntryForTransaction(gamblingConfig().entries, id)) {
-        notify("Delete this linked entry from Gambling Tracker first.", true);
-        break;
-      }
       confirmAction(
         "Delete transaction",
         "This entry will be removed from your ledger.",
@@ -1751,6 +1599,7 @@ function handleClick(e) {
           remember();
           const t = state.transactions.find((t) => t.id === id);
           if (t) removeGoalMovement(t);
+          archiveLinkedGamblingEntry(state, id);
           state.transactions = state.transactions.filter((t) => t.id !== id);
           changed("Transaction deleted.");
         },
@@ -1896,10 +1745,6 @@ function handleClick(e) {
       break;
     }
     case "edit-transaction":
-      if (linkedEntryForTransaction(gamblingConfig().entries, id)) {
-        notify("Edit this linked transaction from Gambling Tracker.", true);
-        break;
-      }
       openModal(
         "transaction",
         "Edit transaction",
@@ -2031,25 +1876,6 @@ document.addEventListener("focusout", (e) => {
   if (e.target.matches(".cell-input")) handleCellChange(e.target);
 });
 document.addEventListener("input", (e) => {
-  if (e.target.closest("#gambling-form")) {
-    const form = e.target.closest("form"), scratch = modal?.data?.kind === "scratch";
-    const price = cents(form.elements.ticketPrice?.value || "0") || 0;
-    const count = Number(form.elements.ticketCount?.value || 0);
-    const stake = scratch ? price * count : cents(form.elements.stake?.value || "0");
-    const payout = cents(form.elements.payout?.value || "0");
-    const total = form.querySelector("#scratch-total");
-    if (total) total.textContent = Number.isSafeInteger(stake) ? fmt(stake) : "—";
-    const preview = form.querySelector("#gambling-net-preview");
-    if (preview) preview.innerHTML = stake !== null && payout !== null && Number.isSafeInteger(stake)
-      ? netHtml(payout - stake) : "Enter valid amounts";
-  }
-  if (e.target.id === "gambling-search") {
-    gamblingSearch = e.target.value;
-    const caret = e.target.selectionStart;
-    render();
-    const input = document.querySelector("#gambling-search");
-    input?.focus(); input?.setSelectionRange(caret, caret);
-  }
   if (e.target.closest("#payday-form") && ["amount", "date"].includes(e.target.name)) {
     const form = e.target.closest("form");
     const amountCents = cents(form.elements.amount.value);

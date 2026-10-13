@@ -1307,45 +1307,6 @@ svg {
 .form-stack textarea {
   width: 100%;
 }
-.gambling-info { border: 1px solid #385145; background: #14231e; border-radius: 11px; color: #aebeb5; padding: 13px 17px; margin-bottom: 18px; font-size: 11px; line-height: 1.6; }
-.gambling-info strong { color: #d7eee2; }
-.gambling-top { margin-bottom: 19px; }
-.gambling-limit { margin-top: 18px; }
-.gambling-limit-heading, .gambling-calculated { display: flex; justify-content: space-between; align-items: center; gap: 14px; font-size: 12px; color: #aebac3; margin-bottom: 10px; }
-.gambling-limit p { font-size: 11px; margin: 9px 0 0; }
-.limit-warning { color: var(--amber); }
-.gambling-trends { display: grid; grid-template-columns: 1fr 1fr; gap: 21px; }
-.gambling-trends h3 { color: #d9e4e7; margin-bottom: 8px; }
-.gambling-trend-row { display: grid; grid-template-columns: 43px minmax(35px, 1fr) 75px 65px; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); padding: 7px 0; font-size: 10px; }
-.gambling-trend-row span { color: #9caab6; }
-.gambling-trend-row strong { white-space: nowrap; }
-.gambling-trend-bar { height: 8px; border-radius: 99px; background: #28313b; overflow: hidden; }
-.gambling-trend-bar i { display: block; height: 100%; border-radius: inherit; }
-.gambling-trend-bar i.gain { background: var(--green); }
-.gambling-trend-bar i.loss { background: var(--rose); }
-.gambling-tabs { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 13px; }
-.gambling-tabs button { background: #151d25; color: #9caab6; border: 1px solid #2d3943; border-radius: 8px; padding: 10px 14px; font-size: 12px; font-weight: 700; }
-.gambling-tabs button.active { background: #20332b; border-color: #4a8265; color: #a9e5c5; }
-.gambling-section { margin-bottom: 30px; }
-.gambling-aggregates { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 18px 0; }
-.gambling-aggregates > div { display: flex; justify-content: space-between; gap: 10px; border: 1px solid #2b3940; background: #192129; border-radius: 8px; padding: 11px; font-size: 11px; min-width: 0; }
-.gambling-aggregates span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gambling-ledger { min-width: 980px; }
-.gambling-ledger td { padding: 10px 11px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
-.gambling-ledger td small { display: block; color: #81909e; margin-top: 3px; }
-.gambling-ledger td:nth-child(1) { width: 105px; }
-.gambling-ledger td:nth-child(2) { width: 120px; }
-.gambling-ledger td:nth-child(3) { min-width: 180px; }
-.gambling-ledger td:nth-child(4), .gambling-ledger td:nth-child(5) { width: 120px; }
-.gambling-ledger td:nth-child(6) { width: 125px; }
-.gambling-ledger td:nth-child(7) { min-width: 180px; }
-.gambling-ledger .gambling-actions { width: 140px; white-space: nowrap; }
-.gambling-actions .btn { padding: 5px 8px; min-height: 28px; margin-right: 4px; }
-.gambling-modal { width: min(100%, 590px); }
-.gambling-calculated { border: 1px solid #385145; background: #12251d; border-radius: 9px; padding: 12px; margin: 0; }
-.gambling-link-panel { display: grid; gap: 12px; border-top: 1px solid var(--line); padding-top: 15px; }
-.gambling-link-panel h3, .gambling-link-panel p { margin: 0; }
-.gambling-link-panel p { font-size: 11px; color: var(--muted); }
 .form-stack > .btn {
   justify-self: start;
 }
@@ -1490,9 +1451,6 @@ svg {
 .paycheck-history .mini-row { gap: 12px; }
 .paycheck-history .mini-row > span { min-width: 92px; text-align: right; }
 @media (max-width: 600px) {
-  .gambling-trends { grid-template-columns: 1fr; }
-  .gambling-aggregates { grid-template-columns: 1fr; }
-  .gambling-tabs button { flex: 1; }
   .payday-modal { padding: 18px; }
   .payday-modal .modal-actions { flex-wrap: wrap; }
   .payday-modal .modal-actions .btn-primary { width: 100%; order: -1; }
